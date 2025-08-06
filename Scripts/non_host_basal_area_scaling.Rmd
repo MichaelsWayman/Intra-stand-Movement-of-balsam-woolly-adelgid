@@ -1,0 +1,145 @@
+---
+title: "Non-hosts"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Non-host stuff
+12/11/23
+Michael Wayman
+
+The goal of this script is to look at our plots in which we have all of our host and non-host trees available (Cox Springs,     Emigration Canyon, and Smith and Morehouse) and calculate various measures of infestation spread as a function of non-host characeristics. We'll look at metrics such as non-host stocking, QMD and SDI and how these may affect our infestation metrics that we've used a few times up to this point such as change in infestation prevalence by basal area and tree count.
+
+** We now have all of our data available
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+## Clean out global environment
+
+```{r}
+rm(list = ls())
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(rfishnet2)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(plyr)
+library(reshape2)
+library(geosphere)
+```
+
+## Load Data
+
+```{r}
+combined <- read_xlsx("combined_cleaned2.xlsx")
+```
+
+## Basal area calculation
+
+To get our stand basal area(BA), we'll calculate and sum every host tree BA. The formula for a tree's BA is: 
+
+Tree BA ($Ft^{2}$) = $\left(\frac{\pi}{576}\right)$ * $DBH^{2}$
+
+Let's first do this for all of our trees and add a column.
+
+```{r}
+combined$DBH <- combined$DBH * 2.54 # convert DBH to cm
+combined <- mutate(combined, BA = (0.0000785 * (DBH ^ 2)))
+combined$Species <- as.factor(combined$Species) # make Species a factor for easier summation later
+combined_na_drop <- combined[!is.na(combined$BA),]
+str(combined) # lots of NA's that we'll deal with later
+
+
+```
+
+## Then we'll just grab our non-host sites
+
+```{r}
+
+cxsp_data_1 <- combined_na_drop %>% filter(`Site ID` == "CXSP" & Visit == 1) # Data includes both visits
+emig_data_1 <- combined_na_drop %>% filter(`Site ID` == "EMIG" & Visit == 1)
+smmh_data_1 <- combined_na_drop %>% filter(`Site ID` == "SMMH" & Visit == 2) # non-host done on 2nd visit
+
+```
+
+## Then we can sum up BA by species for each site
+
+```{r}
+
+cxsp_ba_sum <- cxsp_data_1 %>% 
+               dplyr::group_by(Species) %>%
+               dplyr::summarise(ba_sum = (sum(BA)/0.25), # This gives us sq meter per hectare
+                                count = gdata::nobs(Species, na.rm = T),
+                                 TPHA = (gdata::nobs(Species)/0.25),
+                                 QMD = (sqrt(ba_sum/TPHA))*13.54,
+                                 SDI = TPHA*((QMD/25.4)^(1.605)))
+
+emig_ba_sum <- emig_data_1 %>%
+                dplyr::group_by(Species) %>%
+                dplyr::summarise(ba_sum = (sum(BA)/0.25),
+                                 count = gdata::nobs(Species, na.rm = T),
+                                 TPHA = (gdata::nobs(Species)/0.25),
+                                 QMD = (sqrt(ba_sum/TPHA))*13.54,
+                                 SDI = TPHA*((QMD/25.4)^(1.605)))
+
+smmh_ba_sum <- smmh_data_1 %>%
+                dplyr::group_by(Species) %>%
+                dplyr::summarise(ba_sum = (sum(BA)/0.25),
+                                 count = gdata::nobs(Species, na.rm = T),
+                                 TPHA = (gdata::nobs(Species)/0.25),
+                                 QMD = (sqrt(ba_sum/TPHA))*13.54,
+                                 SDI = TPHA*((QMD/25.4)^(1.605)))
+cxsp_ba_sum
+emig_ba_sum
+smmh_ba_sum
+
+all_non_host <- bind_rows(cxsp_ba_sum, emig_ba_sum, smmh_ba_sum)
+
+# Group by the shared character column and summarize to sum the numeric columns
+summarized_df <- all_non_host %>%
+  group_by(Species) %>%
+  summarize_all(sum)
+
+summarized_df <- summarized_df[-2,]
+
+write_clip(summarized_df)
+
+```

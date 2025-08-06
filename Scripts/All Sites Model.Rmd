@@ -1,0 +1,599 @@
+---
+title: "Bayesian Model - All sites"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(lme4) # to use glmer
+library(data.table)
+library(R2jags)
+
+```
+
+# Clean out environment
+
+```{r}
+rm(list = ls())
+```
+
+# Load data
+
+At time of creation, I want to load in original data, combine visits, then add point data, just to make this as clean as possible(ie. not having duplicate columns with multiple distances and targets and stuff)
+
+```{r, warning=FALSE, echo=FALSE}
+
+data <- read_xlsx("data_with_bearings.xlsx")
+
+```
+
+# Infestation Sum
+
+```{r}
+
+# Visit 1
+# data <- data %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")), 
+#             funs(if_else(startsWith(., "1-"), "1", .))) %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")), as.numeric)
+# Change all "1-" ratings to just a singular 1 value and make numeric
+
+data <- data %>%
+  mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")),~coalesce(., 0)) # change all NA's to 0
+
+data$infestation_sum_v1_focal <- data$NL_v1 + data$NM_v1 + data$NH_v1 + data$SL_v1 + data$SM_v1 + data$SH_v1
+
+# Visit 2
+# data <- data %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")), 
+#             funs(if_else(startsWith(., "1-"), "1", .))) %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")), as.numeric)
+# # Change all "1-" ratings to just a singular 1 valueand make numeric
+# 
+data <- data %>%
+  mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")),~coalesce(., 0)) # change all NA's to 0
+
+data$infestation_sum_v2_focal <- data$NL_v2 + data$NM_v2 + data$NH_v2 + data$SL_v2 + data$SM_v2 + data$SH_v2
+
+data <- data %>%
+  mutate_at(vars(c("NL_v3", "NM_v3", "NH_v3", "SL_v3", "SM_v3", "SH_v3")),~coalesce(., 0)) # change all NA's to 0
+
+data$infestation_sum_v3_focal <- data$NL_v3 + data$NM_v3 + data$NH_v3 + data$SL_v3 + data$SM_v3 + data$SH_v3
+
+data <- data %>%
+  mutate_at(vars(c("NL_v4", "NM_v4", "NH_v4", "SL_v4", "SM_v4", "SH_v4")),~coalesce(., 0)) # change all NA's to 0
+
+data$infestation_sum_v4_focal <- data$NL_v4 + data$NM_v4 + data$NH_v4 + data$SL_v4 + data$SM_v4 + data$SH_v4
+
+# Subset target trees to get infesation sums
+targets <- as.character(data$TARGET)
+infested_subset_inf_sum <- data %>% filter(unique_ID %in% targets) %>% dplyr::select(c("unique_ID", "infestation_sum_v1_focal", "infestation_sum_v2_focal", "infestation_sum_v3_focal", "infestation_sum_v4_focal"))
+names(infested_subset_inf_sum)[1] <- "TARGET"
+names(infested_subset_inf_sum)[2] <- "inf_sum_v1_target"
+names(infested_subset_inf_sum)[3] <- "inf_sum_v2_target"
+names(infested_subset_inf_sum)[4] <- "inf_sum_v3_target"
+names(infested_subset_inf_sum)[5] <- "inf_sum_v4_target"
+
+
+# append sums to our main dataframe
+# Append target coordinates to data frame
+data <- inner_join(data, infested_subset_inf_sum, by = "TARGET")
+str(data)
+
+data$species <- as.factor(data$species)
+
+# Make things!
+
+# BA in cubed meters or something
+data$dbh <- data$dbh * 2.54 # convert DBH to cm
+data <- mutate(data, BA = (0.00007854 * (dbh ^ 2)))
+
+# Crown Height in meters
+data$crown_height <- (data$height - data$canopy_ht) * 0.3048
+
+# Convert to sf
+data_sf <- st_as_sf(data, coords = c("Longitude.focal", "Latitude.focal"), crs = 4326)
+
+# Define the target UTM zone
+target_crs <- 32612  # EPSG code for UTM zone 12
+
+# Transform the coordinates
+data_utm <- st_transform(data_sf, crs = target_crs)
+all_coords <- st_coordinates(data_utm)
+all_coords <- as.data.frame(all_coords)
+
+# Put back into original datframe
+
+data_utm <- data
+data_utm$Longitude.focal <- all_coords$X
+data_utm$Latitude.focal <- all_coords$Y
+
+# data <- data[!duplicated(data), ] #- there shouldn't be duplicates now
+rownames(data_utm) <- data_utm$unique_ID
+
+# Function to get distances for every tree 10m and under
+TEMP_DIST_10 = vegdist(data_utm[,c("Longitude.focal","Latitude.focal")], method = "euclid")
+TEMP_DIST_10.df = as.data.frame(as.matrix(TEMP_DIST_10))
+rownames(TEMP_DIST_10.df) = (data$unique_ID)
+colnames(TEMP_DIST_10.df) = (data$unique_ID)
+TEMP_DIST_10.df$`Tag #` = rownames(TEMP_DIST_10.df)
+TEMP_DIST_MELT_10 = reshape2::melt(TEMP_DIST_10.df, id.vars = c("Tag #"))
+colnames(TEMP_DIST_MELT_10) = c("FROM", "TARGET", "DISTANCE")
+
+Holder_10 <- TEMP_DIST_MELT_10
+
+Holder_new_10 <- merge(Holder_10, data, by.x = "TARGET", by.y = "unique_ID")
+data.dt <- as.data.table(Holder_new_10)
+
+# Get all trees under 10m from focal tree
+under10_holder <- data.dt[,.(TARGET, DISTANCE.x), by=.(FROM)][,.SD[which(DISTANCE.x <= 10 & DISTANCE.x != 0)], by=.(FROM)]
+
+filtered_distances <- under10_holder %>%
+  # Extract the site info (assuming the site info is before the "_")
+  mutate(site1 = sub("_.*", "", FROM), 
+         site2 = sub("_.*", "", TARGET)) %>%
+  # Filter rows where site1 matches site2
+  filter(site1 == site2) %>%
+  # Optionally, remove the helper columns site1 and site2
+  select(FROM, TARGET, DISTANCE.x)
+
+# View the filtered data
+df <- filtered_distances
+
+### Different approach to accelerate processing time
+
+# Create a lookup table from your `data`
+lookup <- data %>% select(unique_ID, infested_v1, infestation_sum_v1_focal, dbh, brooms, Gouting_v1, species, BA, crown_height, `Dead / Alive_v1`)
+
+# Join based on TARGET to bring in these variables
+df <- df %>%
+  left_join(lookup, by = c("TARGET" = "unique_ID")) %>%
+  rename(infestation_under10 = infested_v1,
+         infestation.sum.1_under10 = infestation_sum_v1_focal,
+         dbh_under10 = dbh,
+         brooms_under10 = brooms,
+         gouting_under10 = Gouting_v1,
+         species_under10 = species,
+         BA_under10 = BA,
+         crown_ht__under10 = crown_height,
+         dead_alive = `Dead / Alive_v1`)
+
+# Host and non-host BA
+df <- df %>%
+  mutate(host_non = if_else(species_under10 == "ABLA", 1, 0))
+
+# Now calculate local stats
+local.stats <- df %>%
+  group_by(FROM) %>%
+  summarise(
+    n = n(),
+    number.infested_under10 = sum(infestation_under10, na.rm = TRUE),  # number of infested
+    percent.infested_under10 = (sum(infestation_under10, na.rm = TRUE) / n) * 100,  # percent infested
+    infestation.sum_under10 = sum(infestation.sum.1_under10, na.rm = TRUE),  # infestation load
+    average.dbh_under10 = mean(dbh_under10, na.rm = TRUE),  # average dbh
+    brooms_under10 = sum(brooms_under10, na.rm = TRUE),  # number of brooms
+    gouting.sum_under = sum(gouting_under10, na.rm = TRUE),  # gouting sum
+    basal_area_non_host = sum(BA_under10[host_non == 0], na.rm = TRUE),  # non-host BA
+    basal_area_host = sum(BA_under10[host_non == 1], na.rm = TRUE),  # host BA
+    percent_basal_area_non_host = basal_area_non_host / (basal_area_non_host + basal_area_host) * 100,  # percent non-host BA
+    crown_ht_sum = sum(crown_ht__under10, na.rm = TRUE),
+    mean_distance_infested = ifelse(sum(infestation_under10) == 0, NA, mean(DISTANCE.x[infestation_under10 == 1], na.rm = TRUE))  # mean distance of infested trees
+  )
+
+###
+
+# Create a function to extract the variable based on the linked tree ID
+# extractVariable <- function(TARGET, variable) {
+#   linkedTreeRow <- data[data$unique_ID == TARGET, ]
+#   if (nrow(linkedTreeRow) > 0) {
+#     return(linkedTreeRow[[variable]])
+#   } else {
+#     return(NA)  # or any other value to indicate missing data
+#   }
+# }
+# 
+# str(data)
+# 
+# # Apply the function to create a new column with the extracted variable - need to change function for each extraction !!
+# df$infestation_under10 <- sapply(df$TARGET, extractVariable, variable = "infested_v1")
+# df$infestation.sum.1_under10 <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v1_focal")
+# df$dbh_under10 <- sapply(df$TARGET, extractVariable, variable = "dbh")
+# df$brooms_under10 <- sapply(df$TARGET, extractVariable, variable = "brooms")
+# df$gouting_under10 <- sapply(df$TARGET, extractVariable, variable = "Gouting_v1")
+# df$species_under10 <- sapply(df$TARGET, extractVariable, variable = "Species_v1")
+# df$BA_under10 <- sapply(df$TARGET, extractVariable, variable = "BA")
+# df$crown_ht__under10 <- sapply(df$TARGET, extractVariable, variable = "crown_height")
+# df$dead_alive <- sapply(df$TARGET, extractVariable, variable = "dead_alive")
+# 
+# # Host and non-host BA
+# df$host_non <- if_else(df$species_under10 == "ABLA", 1, 0)
+# 
+# # create a summary table of local stats for each tree
+# local.stats <- df %>% 
+#   dplyr::group_by(FROM) %>% 
+#   dplyr::summarise(n = n(),
+#                    number.infested_under10 = sum(infestation_under10), # number of infested
+#                    percent.infested_under10 = (sum(infestation_under10)/n) * 100, # percent infested
+#                    infestation.sum_under10 = sum(infestation.sum.1_under10), # infestation load or propagule pressure
+#                    average.dbh_under10 = mean(dbh_under10, na.rm = TRUE), # average dbh
+#                    brooms_under10 = sum(brooms_under10), # number of brooms (this may not be anything)
+#                    # avg.gouting_under10 = mean(gouting_under10, na.rm = TRUE), # Since we only have 1's at EMIG, average isn't useful
+#                    gouting.sum_under = sum(gouting_under10, na.rm = TRUE), # gouting sum
+#                    basal_area_non_host = sum(BA_under10[!is.na(host_non) & host_non != 1], na.rm = TRUE), # non-host BA
+#                    basal_area_host = sum(BA_under10[host_non == 1], na.rm = TRUE), # host BA
+#                    percent_basal_area_non_host = basal_area_non_host / (basal_area_non_host + basal_area_host) * 100, # percent BA of non-host
+#                    crown_ht_sum = sum(crown_ht__under10, na.rm = TRUE),
+#                    mean_distance_infested = ifelse(sum(infestation_under10) == 0, NA, mean(DISTANCE[infestation_under10 == 1], na.rm = TRUE))) # If there's no infestation within 10m, it'll come out as NA 
+
+names(local.stats)[1] <- "unique_ID"
+
+# combine with data
+data_with_local_stats <- data %>% inner_join(local.stats, by = "unique_ID")
+
+
+```
+
+# Visit 2 - Local Stats
+
+```{r}
+
+# Get all trees under 10m from focal tree
+under10_holder2 <- data.dt[,.(TARGET2, DISTANCE.x), by=.(FROM)][,.SD[which(DISTANCE.x <= 10 & DISTANCE.x != 0)], by=.(FROM)]
+
+filtered_distances2 <- under10_holder2 %>%
+  # Extract the site info (assuming the site info is before the "_")
+  mutate(site1 = sub("_.*", "", FROM), 
+         site2 = sub("_.*", "", TARGET2)) %>%
+  # Filter rows where site1 matches site2
+  filter(site1 == site2) %>%
+  # Optionally, remove the helper columns site1 and site2
+  select(FROM, TARGET2, DISTANCE.x)
+
+# View the filtered data
+df2 <- filtered_distances2
+
+### Different approach to accelerate processing time
+
+# Create a lookup table from your `data`
+lookup2 <- data %>% select(unique_ID, infested_v2, infestation_sum_v2_focal, dbh, brooms, Gouting_v2, species, BA, crown_height, `Dead / Alive_v2`)
+
+# Join based on TARGET to bring in these variables
+df2 <- df2 %>%
+  left_join(lookup2, by = c("TARGET2" = "unique_ID")) %>%
+  rename(infestation_under10_2 = infested_v2,
+         infestation.sum.1_under10_2 = infestation_sum_v2_focal,
+         dbh_under10_2 = dbh,
+         brooms_under10_2 = brooms,
+         gouting_under10_2 = Gouting_v2,
+         species_under10_2 = species,
+         BA_under10_2 = BA,
+         crown_ht__under10_2 = crown_height,
+         dead_alive_2 = `Dead / Alive_v2`)
+
+# Host and non-host BA
+df2 <- df2 %>%
+  mutate(host_non = if_else(species_under10_2 == "ABLA", 1, 0))
+
+# Now calculate local stats
+local.stats_2 <- df2 %>%
+  group_by(FROM) %>%
+  summarise(
+    n_2 = n(),
+    number.infested_under10_2 = sum(infestation_under10_2, na.rm = TRUE),  # number of infested
+    percent.infested_under10_2 = (sum(infestation_under10_2, na.rm = TRUE) / n_2) * 100,  # percent infested
+    infestation.sum_under10_2 = sum(infestation.sum.1_under10_2, na.rm = TRUE),  # infestation load
+    average.dbh_under10_2 = mean(dbh_under10_2, na.rm = TRUE),  # average dbh
+    brooms_under10_2 = sum(brooms_under10_2, na.rm = TRUE),  # number of brooms
+    gouting.sum_under_2 = sum(gouting_under10_2, na.rm = TRUE),  # gouting sum
+    basal_area_non_host_2 = sum(BA_under10_2[host_non == 0], na.rm = TRUE),  # non-host BA
+    basal_area_host_2 = sum(BA_under10_2[host_non == 1], na.rm = TRUE),  # host BA
+    percent_basal_area_non_host_2 = basal_area_non_host_2 / (basal_area_non_host_2 + basal_area_host_2) * 100,  # percent non-host BA
+    crown_ht_sum_2 = sum(crown_ht__under10_2, na.rm = TRUE),
+    mean_distance_infested_2 = ifelse(sum(infestation_under10_2) == 0, NA, mean(DISTANCE.x[infestation_under10_2 == 1], na.rm = TRUE))  # mean distance of infested trees
+  )
+
+names(local.stats_2)[1] <- "unique_ID"
+
+# combine with data
+data_with_local_stats <- data_with_local_stats %>% inner_join(local.stats_2, by = "unique_ID")
+
+```
+
+# Visit 3 - Local Stats
+
+```{r}
+
+# Get all trees under 10m from focal tree
+under10_holder3 <- data.dt[,.(TARGET3, DISTANCE.x), by=.(FROM)][,.SD[which(DISTANCE.x <= 10 & DISTANCE.x != 0)], by=.(FROM)]
+
+filtered_distances3 <- under10_holder3 %>%
+  # Extract the site info (assuming the site info is before the "_")
+  mutate(site1 = sub("_.*", "", FROM), 
+         site2 = sub("_.*", "", TARGET3)) %>%
+  # Filter rows where site1 matches site2
+  filter(site1 == site2) %>%
+  # Optionally, remove the helper columns site1 and site2
+  select(FROM, TARGET3, DISTANCE.x)
+
+# View the filtered data
+df3 <- filtered_distances3
+
+### Different approach to accelerate processing time
+
+# Create a lookup table from your `data`
+lookup3 <- data %>% select(unique_ID, infested_v3, infestation_sum_v3_focal, dbh, brooms, Gouting_v3, species, BA, crown_height, `Dead / Alive_v3`)
+
+# Join based on TARGET to bring in these variables
+df3 <- df3 %>%
+  left_join(lookup3, by = c("TARGET3" = "unique_ID")) %>%
+  rename(infestation_under10_3 = infested_v3,
+         infestation.sum.1_under10_3 = infestation_sum_v3_focal,
+         dbh_under10_3 = dbh,
+         brooms_under10_3 = brooms,
+         gouting_under10_3 = Gouting_v3,
+         species_under10_3 = species,
+         BA_under10_3 = BA,
+         crown_ht__under10_3 = crown_height,
+         dead_alive_3 = `Dead / Alive_v3`)
+
+# Host and non-host BA
+df3 <- df3 %>%
+  mutate(host_non = if_else(species_under10_3 == "ABLA", 1, 0))
+
+# Now calculate local stats
+local.stats_3 <- df3 %>%
+  group_by(FROM) %>%
+  summarise(
+    n_3 = n(),
+    number.infested_under10_3 = sum(infestation_under10_3, na.rm = TRUE),  # number of infested
+    percent.infested_under10_3 = (sum(infestation_under10_3, na.rm = TRUE) / n_3) * 100,  # percent infested
+    infestation.sum_under10_3 = sum(infestation.sum.1_under10_3, na.rm = TRUE),  # infestation load
+    average.dbh_under10_3 = mean(dbh_under10_3, na.rm = TRUE),  # average dbh
+    brooms_under10_3 = sum(brooms_under10_3, na.rm = TRUE),  # number of brooms
+    gouting.sum_under_3 = sum(gouting_under10_3, na.rm = TRUE),  # gouting sum
+    basal_area_non_host_3 = sum(BA_under10_3[host_non == 0], na.rm = TRUE),  # non-host BA
+    basal_area_host_3 = sum(BA_under10_3[host_non == 1], na.rm = TRUE),  # host BA
+    percent_basal_area_non_host_3 = basal_area_non_host_3 / (basal_area_non_host_3 + basal_area_host_3) * 100,  # percent non-host BA
+    crown_ht_sum_3 = sum(crown_ht__under10_3, na.rm = TRUE),
+    mean_distance_infested_3 = ifelse(sum(infestation_under10_3) == 0, NA, mean(DISTANCE.x[infestation_under10_3 == 1], na.rm = TRUE))  # mean distance of infested trees
+  )
+
+names(local.stats_3)[1] <- "unique_ID"
+
+# combine with data
+data_with_local_stats <- data_with_local_stats %>% inner_join(local.stats_3, by = "unique_ID")
+
+```
+
+# Visit 4 - Local Stats
+
+```{r}
+
+# Get all trees under 10m from focal tree
+under10_holder4 <- data.dt[,.(TARGET4, DISTANCE.x), by=.(FROM)][,.SD[which(DISTANCE.x <= 10 & DISTANCE.x != 0)], by=.(FROM)]
+
+filtered_distances4 <- under10_holder4 %>%
+  # Extract the site info (assuming the site info is before the "_")
+  mutate(site1 = sub("_.*", "", FROM), 
+         site2 = sub("_.*", "", TARGET4)) %>%
+  # Filter rows where site1 matches site2
+  filter(site1 == site2) %>%
+  # Optionally, remove the helper columns site1 and site2
+  select(FROM, TARGET4, DISTANCE.x)
+
+# View the filtered data
+df4 <- filtered_distances4
+
+### Different approach to accelerate processing time
+
+# Create a lookup table from your `data`
+lookup4 <- data %>% select(unique_ID, infested_v4, infestation_sum_v4_focal, dbh, brooms, Gouting_v4, species, BA, crown_height, `Dead / Alive_v4`)
+
+# Join based on TARGET to bring in these variables
+df4 <- df4 %>%
+  left_join(lookup4, by = c("TARGET4" = "unique_ID")) %>%
+  rename(infestation_under10_4 = infested_v4,
+         infestation.sum.1_under10_4 = infestation_sum_v4_focal,
+         dbh_under10_4 = dbh,
+         brooms_under10_4 = brooms,
+         gouting_under10_4 = Gouting_v4,
+         species_under10_4 = species,
+         BA_under10_4 = BA,
+         crown_ht__under10_4 = crown_height,
+         dead_alive_4 = `Dead / Alive_v4`)
+
+# Host and non-host BA
+df4 <- df4 %>%
+  mutate(host_non = if_else(species_under10_4 == "ABLA", 1, 0))
+
+# Now calculate local stats
+local.stats_4 <- df4 %>%
+  group_by(FROM) %>%
+  summarise(
+    n_4 = n(),
+    number.infested_under10_4 = sum(infestation_under10_4, na.rm = TRUE),  # number of infested
+    percent.infested_under10_4 = (sum(infestation_under10_4, na.rm = TRUE) / n_4) * 100,  # percent infested
+    infestation.sum_under10_4 = sum(infestation.sum.1_under10_4, na.rm = TRUE),  # infestation load
+    average.dbh_under10_4 = mean(dbh_under10_4, na.rm = TRUE),  # average dbh
+    brooms_under10_4 = sum(brooms_under10_4, na.rm = TRUE),  # number of brooms
+    gouting.sum_under_4 = sum(gouting_under10_4, na.rm = TRUE),  # gouting sum
+    basal_area_non_host_4 = sum(BA_under10_4[host_non == 0], na.rm = TRUE),  # non-host BA
+    basal_area_host_4 = sum(BA_under10_4[host_non == 1], na.rm = TRUE),  # host BA
+    percent_basal_area_non_host_4 = basal_area_non_host_4 / (basal_area_non_host_4 + basal_area_host_4) * 100,  # percent non-host BA
+    crown_ht_sum_4 = sum(crown_ht__under10_4, na.rm = TRUE),
+    mean_distance_infested_4 = ifelse(sum(infestation_under10_4) == 0, NA, mean(DISTANCE.x[infestation_under10_4 == 1], na.rm = TRUE))  # mean distance of infested trees
+  )
+
+names(local.stats_4)[1] <- "unique_ID"
+
+# combine with data
+data_with_local_stats <- data_with_local_stats %>% inner_join(local.stats_4, by = "unique_ID")
+
+#library(writexl)
+#write_xlsx(data_with_local_stats, "all_sites_all_visits_under10_data.xlsx")
+
+```
+
+# Bayesian Model
+
+```{r}
+
+# Filter out hosts to not skew infested metric
+host_local <- data_with_local_stats %>% filter(species == "ABLA" | species == "ABCO")
+
+# Change NA's in mean distance infested to 0 - this is just to get it to run!! - NEED TO CHANGE FOR FINAL MODEL - 0 might be right since I think we're getting NA's because there's no infested within 10 meters
+host_local$mean_distance_infested[is.na(host_local$mean_distance_infested)] <- 0
+
+# Check for NA's
+
+host_local$dbh[is.na(host_local$dbh)] <- 2.54/2
+host_local$Gouting_v1[is.na(host_local$Gouting_v1)] <- 0
+host_local$infested_v1[is.na(host_local$infested_v1)] <- 0
+
+na_subset <- host_local[, c("infested_v1", "DISTANCE", "dbh", "Gouting_v1", "brooms", "infestation.sum_under10", "mean_distance_infested", "percent_basal_area_non_host", "basal_area_host", "average.dbh_under10", "number.infested_under10", "percent.infested_under10", "crown_ht_sum", "Name"), drop = FALSE]
+
+anyNA(na_subset)
+
+host_local$crown_ht_sum_std <- (host_local$crown_ht_sum - mean(host_local$crown_ht_sum))/sd(host_local$crown_ht_sum)
+host_local$infest_sum_10_std <- (host_local$infestation.sum_under10 - mean(host_local$infestation.sum_under10))/sd(host_local$infestation.sum_under10)
+host_local$basal_area_host_std <- (host_local$basal_area_host - mean(host_local$basal_area_host))/sd(host_local$basal_area_host)
+
+pow <- function(base, exponent) {
+  return(base^exponent)
+}
+
+infested_jags_data_re <- list(infested = host_local$infested_v1, 
+                            logDISTANCE = log(host_local$DISTANCE),
+                            DBH_focal = log(host_local$dbh), 
+                            Gouting_focal = host_local$Gouting_v1,
+                            Brooms_focal = host_local$brooms,
+                            infest_sum_10 = host_local$infest_sum_10_std,
+                            mean_dist_infest_10 = host_local$mean_distance_infested,
+                            # non_host_ba_perc = host_local$percent_basal_area_non_host,
+                            host_ba = host_local$basal_area_host_std,
+                            # avg_dbh_10 = host_local$average.dbh_under10,
+                            n_infest_10 = host_local$number.infested_under10,
+                            percent_infested_10 = host_local$percent.infested_under10,
+                            # crown_ht_sum = host_local$crown_ht_sum_std,
+                            tree = as.numeric(as.factor(host_local$unique_ID)),
+                            N = nrow(host_local), 
+                            N_tree = length(levels(factor(host_local$unique_ID)))
+                                                              )
+# Model
+infested_jags_naive_re <- function(){
+  # Priors:
+  beta_0 ~ dnorm(0, 0.5) # intercept (use diffuse normal just as we would for standard regression)
+  beta_distance ~ dnorm(0, 0.5) # slope (use diffuse normal just as we would for standard regression)
+  beta_dbh ~ dnorm(0, 0.5)
+  beta_gouting ~ dnorm(0, 0.5)
+  beta_brooms ~ dnorm(0, 0.5)
+  beta_infestsum ~ dnorm(0, 0.5)
+  beta_mean_dist_infest ~ dnorm(0, 0.5)
+  #beta_non_host_ba_perc ~ dnorm(0, 0.5)
+  beta_host_ba ~ dnorm(0, 0.5)
+  # beta_avg_dbh ~ dnorm(0, 0.5)
+  beta_n_infest ~ dnorm(0, 0.5)
+  beta_percent_infest ~ dnorm(0, 0.5)
+  # beta_crown_ht ~ dnorm(0, 0.5)
+  
+  for(t in 1:N_tree){
+    beta_tree[t] ~ dnorm(0, tau_tree)
+  }
+  
+  sigma_sq_tree ~ dunif(0, 100) # here's my prior for tree
+  tau_tree <- pow(sigma_sq_tree,-2) # here, I'm converting from that variance to the precision (tau = 1/sqrt(var))
+  
+  # Likelihood:
+  for (i in 1:N){
+    lin_comb[i] <- beta_0 + (beta_distance * logDISTANCE[i]) + (beta_dbh * DBH_focal[i]) +
+      (beta_gouting * Gouting_focal[i]) + (beta_brooms * Brooms_focal[i]) + (beta_infestsum * infest_sum_10[i]) + (beta_mean_dist_infest * mean_dist_infest_10[i]) + (beta_host_ba * host_ba[i])+ beta_n_infest * n_infest_10[i] + beta_percent_infest * percent_infested_10[i]
+    #+ beta_non_host_ba_perc * non_host_ba_perc[i] + beta_host_ba * host_ba[i] + beta_avg_dbh * avg_dbh_10[i]  + beta_crown_ht * crown_ht_sum[i] + (beta_non_host_ba_perc * non_host_ba_perc[i])
+    + beta_tree[tree[i]]
+    
+    # here's our linear combination of predictors, just like in a standard regression
+    
+     p[i] <- exp(lin_comb[i])/(1 + exp(lin_comb[i]))
+    infested[i] ~ dbinom(p[i], 1) # Here's the Binomial likelihood,
+  }
+}
+
+infested_inits_re <- function(){
+  list(beta_0 = rnorm(1, 0, 1), 
+       beta_distance = rnorm(1, 0, 1),
+       beta_dbh = rnorm(1, 0, 1),
+       beta_gouting = rnorm(1, 0, 1),
+       beta_brooms = rnorm(1, 0, 1),
+       beta_infestsum = rnorm(1, 0, 1),
+       beta_mean_dist_infest = rnorm(1, 0, 1),
+       #beta_non_host_ba_perc = rnorm(1, 0, 1),
+       beta_host_ba = rnorm(1, 0, 1),
+       # beta_avg_dbh = rnorm(1, 0, 1),
+       beta_n_infest = rnorm(1, 0, 1),
+       beta_percent_infest = rnorm(1, 0, 1),
+       # beta_crown_ht = rnorm(1, 0, 1))
+    #,
+       beta_tree = rep(0, length(levels(factor(host_local$unique_ID)))))
+       #p = runif(1, 0.1, 0.9))
+}
+
+ infested_params_re <- c("beta_0", "beta_distance", "beta_dbh", "beta_gouting", "beta_brooms", "beta_infestsum",
+   "beta_mean_dist_infest", "beta_host_ba", "beta_n_infest", "beta_percent_infest",# "beta_non_host_ba_perc", "beta_avg_dbh",  "beta_crown_ht",
+   "sigma_sq_tree",
+   "p")
+
+infested_fit_naive_re <- jags(data = infested_jags_data_re, 
+                            inits = infested_inits_re, 
+                            parameters.to.save = infested_params_re, 
+                            model.file = infested_jags_naive_re,
+                            n.chains = 3,
+                            n.iter = 12000, 
+                            n.burnin = 2000, 
+                            n.thin = 10, 
+                            DIC = F)
+
+mcmcplots::mcmcplot(infested_fit_naive_re)
+
+
+```
+
+
+

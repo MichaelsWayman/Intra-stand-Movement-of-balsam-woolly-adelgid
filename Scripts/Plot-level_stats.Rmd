@@ -1,0 +1,424 @@
+---
+title: "Plot-level stats"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Preliminary Analysis
+10/31/23
+Michael Wayman
+
+Plot-level statistics of Abies lasiocarpa (due to lack of non-host data) in association with Dispersal of Balsam Woolly Adelgid in the Intermountain Region. The goal is to attain plot-level statistics including:
+
+1. Prevalence by tree count, basal area, and by section (check, check, and check) 
+2. BA (check)
+3. QMD (check)
+4. Plot-level density (SDI) (check)
+5. Average Heights (if available) - look at canopy heights, there's a mistake of 736 somewhere in there and get rid of 0's - this may not be hepful atm honestly, I think calculations using this will help in the future, but what does average canopy height tell us? not much
+*
+6. Degree days - I think I should do temp stuff on a different file
+7. Mean temps
+*
+
+8. Change of prevalence from Time 1 to Time 2 (check)
+9. Species composition (Unable to complete as of 10/31/23 due to lack of non-host data)
+
+# Set up
+
+## Directory
+
+## Clean out global environment
+
+```{r}
+rm(list = ls())
+```
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(Rcpp)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(reshape2)
+library(fastmap)
+library(pandoc)
+library(writexl)
+```
+
+## Data
+
+Look at cleaning script for info on initial cleaning
+
+```{r import}
+combined <- read_xlsx("combined_cleaned.xlsx")
+```
+
+# Prevalence by tree count
+
+For most calculations, we'll need to filter out all alive abla.
+
+For prevalence, we're going to change infestation location to a binary variable. This will make it easier to calculate prevalence. For prevalence itself, we'll do it two different ways; percent prevalence by tree count and percent prevalence by stand basal area.
+
+First, we'll filter all live ABLA.
+
+```{r get live}
+live_abla <- combined %>% dplyr::filter(Species == "ABLA" & combined$`Dead / Alive` == 1)
+unique(live_abla$`Dead / Alive`) # check to make sure filter worked
+unique(live_abla$Species)
+```
+
+Then, we'll make our Location a binary variable.
+
+```{r code location}
+live_abla$`Inf Location`[ live_abla$`Inf Location`== "-"] <- 0
+unique(live_abla$`Inf Location`)
+live_abla$`Inf Location`[live_abla$`Inf Location` == "BO" | live_abla$`Inf Location` == "BR, BO" | live_abla$`Inf Location` == "BR"] <- 1
+```
+
+Now we can get the prevalence by total trees for each visit.
+
+```{r get percentages}
+unique(live_abla$`Inf Location`) # found some NA's
+live_abla <- live_abla[!is.na(live_abla$`Inf Location`),] # drop NA's
+
+visit_1 <- live_abla %>% filter(live_abla$Visit == 1)
+visit_2 <- live_abla %>% filter(live_abla$Visit == 2)
+
+prev_table_1 <- table(visit_1$`Site ID`, visit_1$`Inf Location`) # make a table of status by site
+prev_table_2 <- table(visit_2$`Site ID`, visit_2$`Inf Location`)
+
+perc_table_1 <- prop.table(prev_table_1, margin = 1) %>% `*`(100) %>% round(2) # look at percentages by site
+
+perc_table_2 <- prop.table(prev_table_2, margin = 1) %>% `*`(100) %>% round(2)
+
+
+final_percentages_1 <- perc_table_1[,"1"]
+final_percentages_2 <- perc_table_2[,"1"]
+final_percentages_1
+final_percentages_2
+percent_difference <- final_percentages_2 - final_percentages_1
+```
+
+We're seeing percentages rise at every site by tree numbers alone, let's see how this changes when we look at infestation by basal area.
+
+# Prevalence by basal area
+
+## Basal area calculation by site
+
+To get our stand basal area(BA), we'll calculate and sum every host tree BA. The formula for a tree's BA is: 
+
+Tree BA ($Ft^{2}$) = $\left(\frac{\pi}{576}\right)$ * $DBH^{2}$
+
+Let's first do this for all of our trees and add a column.
+
+```{r calculate BA}
+combined <- mutate(combined, BA = (0.005454154 * (DBH ^ 2)))
+head(combined) # lots of NA's that we'll deal with later
+```
+
+Now we'll sum up our host tree BA for each infested/non-infested as well as site totals on every site
+
+```{r BA calc and perc}
+live_abla <- combined %>% dplyr::filter(Species == "ABLA" & combined$`Dead / Alive` == 1)# we only need infested and site total, so lets drop our non-infested trees
+
+## we need to run this code again to get binary infestation again
+live_abla$`Inf Location`[ live_abla$`Inf Location`== "-"] <- 0
+unique(live_abla$`Inf Location`)
+live_abla$`Inf Location`[live_abla$`Inf Location` == "BO" | live_abla$`Inf Location` == "BR, BO" | live_abla$`Inf Location` == "BR"] <- 1
+##
+
+infested_ba_1 <- live_abla %>% filter(`Inf Location` == 1 & Visit == 1)
+infested_ba_2 <- live_abla %>% filter(`Inf Location` == 1 & Visit == 2) # we re-make our live host tree, now with BA
+
+visit_1_ba <- live_abla %>% filter(live_abla$Visit == 1) # we'll remake our visits with BA
+visit_2_ba <- live_abla %>% filter(live_abla$Visit == 2) # the stand BA may differ slightly between visits because of trees added/lost
+
+visit_1_ba <- visit_1_ba[!is.na(visit_1_ba$BA),] # drop NA's for sum
+site_ba_1 <- visit_1_ba %>% dplyr::group_by(`Site ID`) %>% summarise("Stand BA" = sum(BA/0.25) * 0.404686) # sum BA and convert to square feet per acre
+
+visit_2_ba <- visit_2_ba[!is.na(visit_2_ba$BA),]
+site_ba_2 <- visit_2_ba %>% group_by(`Site ID`) %>% summarise("Stand BA" = sum(BA/0.25) * 0.404686) # sum BA
+
+# we had some NA's in the Inf location, so lets drop those before we group by status
+visit_1_ba <- visit_1_ba[!is.na(visit_1_ba$`Inf Location`),]
+
+# we only need infested and site total, so lets drop our non-infested trees
+infested_ba_1 <- visit_1_ba %>% filter(`Inf Location` == 1)
+infested_ba_2 <- visit_1_ba %>% filter(`Inf Location` == 1)
+
+infested_ba_1 <- infested_ba_1 %>% group_by(`Site ID`) %>% summarise(BA_by_status = sum(BA/0.25) * 0.404686)
+infested_ba_2 <- infested_ba_2 %>% group_by(`Site ID`) %>% summarise(BA_by_status = sum(BA/0.25) * 0.404686)
+
+
+site_ba_1 # Remember, this is JUST Live ABLA, not all trees, so not all BA on the site
+site_ba_2 # Remember, this is JUST Live ABLA, not all trees, so not all BA on the site
+
+# Now we can combine our two summed variables and create a percentage based on basal area
+
+ba_infested_1 <- inner_join(infested_ba_1,site_ba_1,by="Site ID") %>% mutate(Percentage_infested_by_BA = (BA_by_status/`Stand BA`)*100)
+ba_infested_2 <- inner_join(infested_ba_2,site_ba_2,by="Site ID") %>% mutate(Percentage_infested_by_BA = (BA_by_status/`Stand BA`)*100)
+
+# Let's take that percentage column and compare it with our percentages we got by pure tree count
+
+perc_infested_ba_1 <- ba_infested_1 %>% select(`Site ID`, Percentage_infested_by_BA) # make a new object with just percentages
+perc_infested_ba_2 <- ba_infested_2 %>% select(`Site ID`, Percentage_infested_by_BA)
+
+# Try to combine these percentages with our tree count percentages above
+# What we'll do is extract our percentages above and tack them on to our precentages that we just made
+perc_by_tree_1 <- as.vector(final_percentages_1)
+perc_by_tree_2 <- as.vector(final_percentages_2)
+
+perc_infested_ba_1$perc_by_tree <- perc_by_tree_1
+perc_infested_ba_1$visit <- 1 # gonna add a visit here so I can stack these two tables
+perc_infested_ba_2$perc_by_tree <- perc_by_tree_2
+perc_infested_ba_2$visit <- 2
+perc_infested_ba <- perc_infested_ba_1 %>% bind_rows(perc_infested_ba_2) # Smash these two puppies together so I can graph it out
+
+perc_infested_ba <- perc_infested_ba %>% group_by(visit)
+
+## Now we have a table showing infestation percentages by BA as well as by tree count. They vary quite a bit
+# I want to get a table with both BA percentages on there so I can easily subtract them, but I think I need to brute force it unfortunatley, 
+perc_difference_by_ba <- perc_infested_ba %>% reshape2::dcast(`Site ID` ~ visit, value.var = "Percentage_infested_by_BA")
+names(perc_difference_by_ba)[2:3] = c("visit1", "visit2") # cant mutate with numbers as variable names
+perc_difference_by_ba <- perc_difference_by_ba %>% mutate(diff = visit2 - visit1)
+
+```
+
+I'm thinking now that I'd like a couple decent graphs just to show this prevalence disparity and to try and visualize what the prevalence changes are from visit 1 to visit 2. I've combined the two summary tables together up above so we can plot it out nicely.
+
+```{r plot percentages}
+ggplot(perc_infested_ba, aes(fill = factor(visit), y = Percentage_infested_by_BA, x = `Site ID`)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(x="Sites", y="% Infestation by Basal Area") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + # gets rid of plot lines
+    scale_fill_discrete(labels=c('Visit 1', 'Visit 2')) +
+    scale_fill_discrete(name = "Visit")
+
+ggplot(perc_infested_ba, aes(fill = factor(visit), y = perc_by_tree, x = `Site ID`)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(x="Sites", y="% Infestation by Tree Count") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + # gets rid of plot lines
+    scale_fill_discrete(labels=c('Visit 1', 'Visit 2')) +
+    scale_fill_discrete(name = "Visit")
+```
+
+# Prevalence by section
+
+So now I want to calculate prevalence by section. Meaning, I want to know what percentage of all the sections measured (6 per tree) were infested at the time of assessment. We don't care how infested they were, just if they were infested or not. So we'll convert our ratings for our live hosts into a binary (1 or 0) variable and then sum up the ratings for each site. This will give us percentages just like our previous prevalence calculations. I expect these percentages to be lower than the others because we have so many more sections with less of them being infested.
+
+```{r prevalence by section, warning=FALSE}
+abies <- combined %>% filter(Species == "ABLA" | Species == "ABCO") # Filter Hosts
+live_hosts_1 <- abies %>% filter(`Dead / Alive` == 1 & Visit == 1) # Filter Live and first visit
+section_prev_1 <- live_hosts_1 # make new object to change a bunch of shtuff
+section_prev_1[section_prev_1 == "-"] <- "0" # change all "-" to a zero
+section_prev_1$NL[section_prev_1$NL != "0"] <- 1 # replace all values in column that aren't 0
+section_prev_1$NM[section_prev_1$NM != "0"] <- 1 # Do this for all sections
+section_prev_1$NH[section_prev_1$NH != "0"] <- 1
+section_prev_1$SL[section_prev_1$SL != "0"] <- 1
+section_prev_1$SM[section_prev_1$SM != "0"] <- 1
+section_prev_1$SH[section_prev_1$SH != "0"] <- 1
+# to make tables easier later, we'll dchange all these sections to numeric
+section_prev_1[,13:24] <- lapply(section_prev_1[,13:24], as.numeric)
+section_prev_1[, 13:24][is.na(section_prev_1[, 13:24])] <- 0 # replace NA's with 0s
+
+# Do the same for visit 2
+live_hosts_2 <- abies %>% filter(`Dead / Alive` == 1 & Visit == 2)
+section_prev_2 <- live_hosts_2
+section_prev_2$NL[is.na(section_prev_2$NL)] <- 0
+section_prev_2$NL <- as.numeric(section_prev_2$NL)
+section_prev_2[section_prev_2 == "-"] <- "0" # change all "-" to a zero
+section_prev_2$NL[section_prev_2$NL != "0"] <- 1 # replace all values in column that aren't 0
+section_prev_2$NM[section_prev_2$NM != "0"] <- 1 # Do this for all sections
+section_prev_2$NH[section_prev_2$NH != "0"] <- 1
+section_prev_2$SL[section_prev_2$SL != "0"] <- 1
+section_prev_2$SM[section_prev_2$SM != "0"] <- 1
+section_prev_2$SH[section_prev_2$SH != "0"] <- 1
+# to make tables easier later, we'll dchange all these sections to numeric
+section_prev_2[,13:24] <- lapply(section_prev_2[,13:24], as.numeric)
+section_prev_2[, 13:24][is.na(section_prev_2[, 13:24])] <- 0 # replace NA's with 0s
+
+# Now that we have a binary variable in our sections, we can sum and get percentages 
+
+section_prev_2 %>% 
+  group_by(`Site ID`) %>% 
+  summarise(
+    NL_prop = mean(NL) * 100,
+    NM_prop = mean(NM) * 100,
+    NH_prop = mean(NH) * 100,
+    SL_prop = mean(SL) * 100,
+    SM_prop = mean(SM) * 100,
+    SH_prop = mean(SH) * 100
+  ) # This code gives us the percentage infested of each section per site
+
+# Drop Window variables for now
+section_prev_1 <- section_prev_1 %>% select(-c(NLW, NMW, NHW, SLW, SMW, SHW))
+section_prev_2 <- section_prev_2 %>% select(-c(NLW, NMW, NHW, SLW, SMW, SHW))
+
+# Calculate total count of 1's across sections
+section_prev_1 <- section_prev_1 %>%
+  mutate(total_infested = NL + NM + NH + SL + SM + SH)
+
+section_prev_2 <- section_prev_2 %>%
+  mutate(total_infested = NL + NM + NH + SL + SM + SH)
+# Add a column for section total
+section_prev_1 <- section_prev_1 %>%
+  mutate(total_observations = 6)
+
+section_prev_2 <- section_prev_2 %>%
+  mutate(total_observations = 6)
+
+# Calculate proportions
+Percent_infested_by_section_1 <- section_prev_1 %>%
+  group_by(`Site ID`) %>%
+  summarise(
+    prop_infested_1_by_section = sum(total_infested) / sum(total_observations) * 100
+  )
+
+Percent_infested_by_section_2 <- section_prev_2 %>%
+  group_by(`Site ID`) %>%
+  summarise(
+    prop_infested_2_by_section = sum(total_infested) / sum(total_observations) * 100
+  )
+
+# View the result
+print(Percent_infested_by_section_1)
+print(Percent_infested_by_section_2)
+Percent_infested_by_section_1$prop_infested_2_by_section <- Percent_infested_by_section_2$prop_infested_2_by_section
+Percent_infested_by_section_1 # Final table to make plot with
+
+# Plot Section prevalence
+plot_section_perc <- melt(Percent_infested_by_section_1, id.vars='Site ID')
+ggplot(plot_section_perc, aes(fill = variable, y = value, x = `Site ID`)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(x="Sites", y="% Infestation by section") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + # gets rid of plot lines
+    scale_fill_discrete(labels=c('Visit 1', 'Visit 2'))
+```
+
+# QMD
+
+Now let's get QMD for all of our sites to get an idea of diameter distribution among our trees. The calculation for QMD of a stand is: QMD Equation: sqrt(Plot BA/Plot TPA) * 13.54 (I don't know why this isn't working in markdown, oh well)
+
+
+```{r TPA calc}
+abla <- combined %>% dplyr::filter(Species == "ABLA" & Visit == 1) # lets work with fir, but this time all fir including dead and lets just use trees from first visit to avoid confusion at the moment
+
+counts <- abla %>% count(`Site ID`) # counts of fir for each site
+
+counts <- counts %>% mutate(TPA = (n/0.25) * 0.404686) # This is where we are converting trees/(1/4) hectare to trees per acre
+counts$TPA <- round(counts$TPA, digits = 0) # round result because there's no partial trees in real life
+
+# We need to remake our site BA's to include dead fir too
+
+all_abla <- combined %>% dplyr::filter(Species == "ABLA") # we re-make our host tree, now with BA
+visit_1_ba_all_abla <- all_abla %>% filter(all_abla$Visit == 1) # we'll remake our visits with BA
+visit_1_ba_all_abla <- visit_1_ba_all_abla[!is.na(visit_1_ba_all_abla$BA),] # drop NA's for sum
+site_ba_1_all_abla <- visit_1_ba_all_abla %>% group_by(`Site ID`) %>% summarise("Stand BA" = sum(BA))
+
+
+counts <- inner_join(counts, site_ba_1_all_abla, by = "Site ID")
+counts <- counts %>% mutate(Average_Basal_Area_Per_Tree = `Stand BA` / TPA) %>% mutate(QMD = (sqrt(`Stand BA`/TPA))*13.54)
+counts # This table gives us counts, TPA, Stand BA, Average basal area per tree, and QMD for every site *on visit 1*
+```
+
+
+For plot density, we'll be using Rieneke's SDI: SDI = N(Dq/10)^b where N = TPA, Dq = QMD and b = -1.605. We'll just add that onto our existing count table from above so we have all of our plot statistics in one nice table.
+
+```{r final summary table}
+counts <- counts %>% mutate(SDI = TPA*((QMD/10)^(-1.605)))
+counts
+counts <- counts %>% full_join(Percent_infested_by_section_1, by = "Site ID")
+counts$Percent_by_tree_1 <- perc_by_tree_1
+counts$Percent_by_tree_2 <- perc_by_tree_2
+site_stats <- counts
+write_xlsx(site_stats,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/site_stats.xlsx")
+```
+
+# Heights
+
+We only have heights for a few sites, but let's try to get the average heights for te sites where we do have them
+
+After comparing heights after filtering with heights of all fir, it looks like we have all fir heights for:
+- CXSP
+- EMIG
+- FRNK
+- MTTP
+- SMMH
+```{r heights}
+heights <- combined[!is.na(combined$Height),] # LEt's first drop all of our NA's in our height variable
+heights <- heights %>% dplyr::filter(Species == "ABLA" & Visit == 1) # let's also jst focus on live ABLA from one visit
+
+
+ht_count <- heights %>% count(`Site ID`) # let's see how many heights we have for each site
+compare <- abla %>% count(`Site ID`)
+
+heights <- heights %>% filter(`Site ID` == "CXSP" | `Site ID` == "EMIG" | `Site ID` == "FRNK" | `Site ID` == "MTTP" | `Site ID` == "SMMH") # filter for all the sites we have heights for
+
+average_heights <- heights %>% group_by(`Site ID`) %>% summarise(mean_ht = mean(Height))
+
+average_heights
+
+# We'll do the same thing for canopy heights
+canopy_hts <- combined[!is.na(combined$`Canopy Height`),]
+canopy_hts <- canopy_hts %>% dplyr::filter(Species == "ABLA" & Visit == 1) # let's also jst focus on live ABLA from one visit
+
+
+canopy_ht_count <- canopy_hts %>% count(`Site ID`) # let's see how many heights we have for each site
+compare_canopy <- abla %>% count(`Site ID`)
+
+canopy_hts <- canopy_hts %>% filter(`Site ID` == "CXSP" | `Site ID` == "EMIG" | `Site ID` == "FRNK" | `Site ID` == "MTTP" | `Site ID` == "SMMH") # filter for all the sites we have heights for
+
+average_canopy_heights <- canopy_hts %>% group_by(`Site ID`) %>% summarise(mean_ht = mean(`Canopy Height`))
+average_canopy_heights
+```
+
+
+
+```{r plot-2}
+
+```
+
+### 
+
+```{r plot-3}
+
+```
+
+
+
+```{r plot-4}
+
+```
+
+
+
+
+
+
+## Vizualize
+

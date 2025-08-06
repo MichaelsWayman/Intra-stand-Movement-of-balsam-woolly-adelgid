@@ -1,0 +1,780 @@
+---
+title: "Full Site Model"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Full Site Model
+3/27/24
+Michael Wayman
+
+This will be probably my most ambitious Markdown so far (possibly too ambitious). What I want ot do is look at one site where we have all of our data, which in this case will be Emigration Canyon. We have all of our host and non-host data and two visits. We should hopefully be able to build a model that incorporates spatial and temporal dependency as well as all local statistics around a focal tree. 
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(lme4) # to use glmer
+library(data.table)
+library(R2jags)
+
+```
+
+# Clean out environment
+
+```{r}
+rm(list = ls())
+```
+
+# Load data
+
+At time of creation, I want to load in original data, combine visits, then add point data, just to make this as clean as possible(ie. not having duplicate columns with multiple distances and targets and stuff)
+
+```{r, warning=FALSE, echo=FALSE}
+
+combined <- read_xlsx("combined_cleaned2.xlsx")
+points <- read_xlsx("emig_points.xlsx")
+
+```
+
+# Collapse visits and combine points
+
+```{r}
+# Binary infestation metric
+combined[combined == "-"] <- "0" # change all "-" to a zero
+
+combined <- combined %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) # Change all "1-" ratings to just a singular 1 value
+
+combined <- combined %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")), as.numeric)
+
+combined$NL[is.na(combined$NL)] <- 0
+combined$NM[is.na(combined$NM)] <- 0
+combined$NH[is.na(combined$NH)] <- 0
+combined$SL[is.na(combined$SL)] <- 0
+combined$SM[is.na(combined$SM)] <- 0
+combined$SH[is.na(combined$SH)] <- 0
+
+combined <- combined %>%
+  mutate(infested = ifelse(NL + NM + NH + SL + SM + SH != 0, 1, 0))
+
+names(combined)[1] <- "site"
+emig <- combined %>% dplyr::filter(site == "EMIG")
+
+# First we'll subset by Visit
+visit1 <- emig %>% filter(Visit == 1)
+visit1$tag_ID <- paste(visit1$Species, visit1$`Tag #`, sep = "")
+visit2 <- emig %>% filter(Visit == 2)
+visit2$tag_ID <- paste(visit2$Species, visit2$`Tag #`, sep = "")
+visit3 <- emig %>% filter(Visit == 3)
+visit3$tag_ID <- paste(visit3$Species, visit3$`Tag #`, sep = "")
+visit4 <- emig %>% filter(Visit == 4)
+visit4$tag_ID <- paste(visit4$Species, visit4$`Tag #`, sep = "")
+
+# We'll merge all 4
+visit3 <- visit3 %>%
+  rename_with(~ paste0(., "_v3"), -tag_ID) # add suffixes to visit 3 and 4
+visit4 <- visit4 %>%
+  rename_with(~ paste0(., "_v4"), -tag_ID) 
+
+emig_merged <- visit1 %>%
+  left_join(visit2, by = "tag_ID", suffix = c("_v1", "_v2")) %>%
+  left_join(visit3, by = "tag_ID", suffix = c("", "_v3")) %>%
+  left_join(visit4, by = "tag_ID", suffix = c("", "_v4")) 
+  
+#emig_merged <- inner_join(v1, visit2, by = "tag_ID", suffix = c("_v1", "_Visit2")) # we have duplicates
+emig_merged <- emig_merged %>% distinct(tag_ID, .keep_all = TRUE) # Get rid of duplicates
+
+# Make a host/non-host variable
+emig_merged$host <- if_else(emig_merged$Species_v1 == "ABLA" | emig_merged$Species_v1 == "ABCO", 1, 0)
+
+# Merge with points
+points$Name <- sub("^(\\d+)$", "abla\\1", points$Name)
+points$Name <- toupper(points$Name)
+emig_merged$Name <- paste(emig_merged$Species_v1, emig_merged$`Tag #_v1`, sep = "")
+
+
+emig_merged <- full_join(points, emig_merged, by = "Name")
+
+# Omit points with no data associated or no point associated
+emig_merged <- emig_merged %>% filter(!is.na(site_v1))
+#emig_merged <- emig_merged %>% filter(!is.na(Latitude))
+```
+
+# Distance to all trees
+
+We need to bring in our distance calculator in order to calculate all the local statistics that we want to put into our analysis.
+
+```{r}
+
+# So we need to convert our decimel degrees to UTM for calculation
+all_merged <- emig_merged
+
+# Convert to sf
+all_merged_sf <- st_as_sf(all_merged, coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Define the target UTM zone
+target_crs <- 32612  # EPSG code for UTM zone 12
+
+# Transform the coordinates
+all_merged_utm <- st_transform(all_merged_sf, crs = target_crs)
+all_coords <- st_coordinates(all_merged_utm)
+all_coords <- as.data.frame(all_coords)
+
+# Put back into original datframe
+
+all_merged_utm <- all_merged
+all_merged_utm$Longitude <- all_coords$X
+all_merged_utm$Latitude <- all_coords$Y
+
+# Use Name as unique ID
+# all_merged_utm$unique_ID <- paste(all_merged_utm$site_v1, all_merged_utm$`Tag #`, rownames(all_merged_utm), sep = "_")
+
+all_infested <- all_merged_utm[all_merged_utm$infested_v1 == 1, ] # Infested trees with UTM coordinates
+
+
+# all_merged <- all_merged[!duplicated(all_merged), ] #- there shouldn't be duplicates now
+rownames(all_merged_utm) <- all_merged_utm$Name
+
+# Remove non-host for these calculations
+all_merged_utm_host <- all_merged_utm %>% filter(all_merged_utm$Species_v1 == "ABLA" | all_merged_utm$Species_v1 == "ABCO")
+
+rm(Holder)
+Holder = as.data.frame(matrix(nrow=0,ncol=3)) 
+colnames(Holder) =c("FROM", "TARGET", "DISTANCE")
+
+#Assign rownames as Tree-ID, dataset also needs UTM_X, UTM_Y, and PLOT
+  subset_frame = all_merged_utm_host
+TEMP_DIST = vegdist(subset_frame[,c("Longitude","Latitude")], method = "euclid")
+TEMP_DIST.df = as.data.frame(as.matrix(TEMP_DIST))
+rownames(TEMP_DIST.df) = (subset_frame$Name)
+colnames(TEMP_DIST.df) = (subset_frame$Name)
+TEMP_DIST.df$`Tag #` = rownames(TEMP_DIST.df)
+TEMP_DIST_MELT = reshape2::melt(TEMP_DIST.df, id.vars = c("Tag #"))
+colnames(TEMP_DIST_MELT) = c("FROM", "TARGET", "DISTANCE")
+
+Holder <- TEMP_DIST_MELT
+
+Holder_new <- merge(Holder, all_merged_utm, by.x = "TARGET", by.y = "Name")
+holder_new.dt <- as.data.table(Holder_new)
+length(unique(holder_new.dt$tag_ID))
+nrow(holder_new.dt)
+# Change infestation to binary variable so we can index it
+# holder_new.dt$infested_1[holder_new.dt$infested_1 == "-"] <- 0
+# unique(holder_new.dt$infested_1)
+# holder_new.dt$infested_1[holder_new.dt$infested_1 == "BO" | holder_new.dt$infested_1 == "BR, BO" | holder_new.dt$infested_1 == "BR"] <- 1
+# holder_new.dt$infested_1 <- as.numeric(holder_new.dt$infested_1)
+# 
+# holder_new.dt$infested_2[holder_new.dt$infested_2 == "-"] <- 0
+# unique(holder_new.dt$infested_2)
+# holder_new.dt$infested_2[holder_new.dt$infested_2 == "BO" | holder_new.dt$infested_2 == "BR, BO" | holder_new.dt$infested_2 == "BR"] <- 1
+# holder_new.dt$infested_2 <- as.numeric(holder_new.dt$infested_2)
+
+#min_dist_holder <- holder_new.dt[`infested` == 1 & (DISTANCE == min(DISTANCE[(DISTANCE != 0)])) ,.(DISTANCE, TARGET),by=.("unique_ID")]
+
+# distance to nearest infested at time 1
+
+# This isn't working since we have non-host with NA's in the infested variable
+
+min_dist_holder <- holder_new.dt[infested_v1 == 1 ,.(TARGET, DISTANCE),by=.(FROM)][, .SD[which.min(DISTANCE[DISTANCE != 0])],by=.(FROM)]
+
+# distance to nearest infested at time 2
+min_dist_holder2 <- holder_new.dt[infested_v2 == 1 ,.(TARGET, DISTANCE),by=.(FROM)][, .SD[which.min(DISTANCE[DISTANCE != 0])],by=.(FROM)]
+
+# Time 3
+min_dist_holder3 <- holder_new.dt[infested_v3 == 1 ,.(TARGET, DISTANCE),by=.(FROM)][, .SD[which.min(DISTANCE[DISTANCE != 0])],by=.(FROM)]
+# Time 4
+min_dist_holder4 <- holder_new.dt[infested_v4 == 1 ,.(TARGET, DISTANCE),by=.(FROM)][, .SD[which.min(DISTANCE[DISTANCE != 0])],by=.(FROM)]
+
+names(min_dist_holder2)[2] <- "TARGET2"
+names(min_dist_holder2)[3] <- "DISTANCE2"
+names(min_dist_holder3)[2] <- "TARGET3"
+names(min_dist_holder3)[3] <- "DISTANCE3"
+names(min_dist_holder4)[2] <- "TARGET4"
+names(min_dist_holder4)[3] <- "DISTANCE4"
+
+# add distances to data
+# visit 1 distances
+names(min_dist_holder)[1] <- "Name"
+data_with_nearest_infested_dis <- all_merged_utm_host %>% inner_join(min_dist_holder, by = "Name")
+
+# visit 2 distances
+names(min_dist_holder2)[1] <- "Name"
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>% inner_join(min_dist_holder2, by = "Name")
+
+# visit 3
+names(min_dist_holder3)[1] <- "Name"
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>% inner_join(min_dist_holder2, by = "Name")
+
+# visit 4
+names(min_dist_holder4)[1] <- "Name"
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>% inner_join(min_dist_holder2, by = "Name")
+
+# Now we have distances to nearest infested neighbors for host trees on the site
+
+
+#write_xlsx(data_with_nearest_infested_dis,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/data_with_nearest_infested.xlsx")
+
+```
+
+# Infestation Sum
+
+```{r}
+
+# Visit 1
+# data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")), 
+#             funs(if_else(startsWith(., "1-"), "1", .))) %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")), as.numeric)
+# Change all "1-" ratings to just a singular 1 value and make numeric
+
+# data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")),~coalesce(., 0)) # change all NA's to 0
+
+data_with_nearest_infested_dis$infestation_sum_v1_focal <- data_with_nearest_infested_dis$NL_v1 + data_with_nearest_infested_dis$NM_v1 + data_with_nearest_infested_dis$NH_v1 + data_with_nearest_infested_dis$SL_v1 + data_with_nearest_infested_dis$SM_v1 + data_with_nearest_infested_dis$SH_v1
+
+# Visit 2
+# data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")), 
+#             funs(if_else(startsWith(., "1-"), "1", .))) %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")), as.numeric)
+# # Change all "1-" ratings to just a singular 1 valueand make numeric
+# 
+# data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")),~coalesce(., 0)) # change all NA's to 0
+
+data_with_nearest_infested_dis$infestation_sum_v2_focal <- data_with_nearest_infested_dis$NL_v2 + data_with_nearest_infested_dis$NM_v2 + data_with_nearest_infested_dis$NH_v2 + data_with_nearest_infested_dis$SL_v2 + data_with_nearest_infested_dis$SM_v2 + data_with_nearest_infested_dis$SH_v2
+
+data_with_nearest_infested_dis$infestation_sum_v3_focal <- data_with_nearest_infested_dis$NL_v3 + data_with_nearest_infested_dis$NM_v3 + data_with_nearest_infested_dis$NH_v3 + data_with_nearest_infested_dis$SL_v3 + data_with_nearest_infested_dis$SM_v3 + data_with_nearest_infested_dis$SH_v3
+
+data_with_nearest_infested_dis$infestation_sum_v4_focal <- data_with_nearest_infested_dis$NL_v4 + data_with_nearest_infested_dis$NM_v4 + data_with_nearest_infested_dis$NH_v4 + data_with_nearest_infested_dis$SL_v4 + data_with_nearest_infested_dis$SM_v4 + data_with_nearest_infested_dis$SH_v4
+
+# Subset target trees to get infesation sums
+targets <- as.character(data_with_nearest_infested_dis$TARGET)
+infested_subset_inf_sum <- data_with_nearest_infested_dis %>% filter(Name %in% targets) %>% dplyr::select(c("Name", "infestation_sum_v1_focal", "infestation_sum_v2_focal", "infestation_sum_v3_focal", "infestation_sum_v4_focal"))
+names(infested_subset_inf_sum)[1] <- "TARGET"
+names(infested_subset_inf_sum)[2] <- "inf_sum_v1_target"
+names(infested_subset_inf_sum)[3] <- "inf_sum_v2_target"
+names(infested_subset_inf_sum)[4] <- "inf_sum_v3_target"
+names(infested_subset_inf_sum)[5] <- "inf_sum_v4_target"
+
+
+# append sums to our main dataframe
+# Append target coordinates to data frame
+data_with_nearest_infested_dis <- inner_join(data_with_nearest_infested_dis, infested_subset_inf_sum, by = "TARGET")
+str(data_with_nearest_infested_dis)
+
+
+
+# Again for all data so we can extract values for full model
+
+# Visit 1
+# all_merged_utm <- all_merged_utm %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")), 
+#             funs(if_else(startsWith(., "1-"), "1", .))) %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")), as.numeric)
+# # Change all "1-" ratings to just a singular 1 value and make numeric
+# 
+# all_merged_utm <- all_merged_utm %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1")),~coalesce(., 0)) # change all NA's to 0
+
+all_merged_utm$infestation_sum_v1_focal <- all_merged_utm$NL_v1 + all_merged_utm$NM_v1 + all_merged_utm$NH_v1 + all_merged_utm$SL_v1 + all_merged_utm$SM_v1 + all_merged_utm$SH_v1
+
+# Visit 2
+# all_merged_utm <- all_merged_utm %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")), 
+#             funs(if_else(startsWith(., "1-"), "1", .))) %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")), as.numeric)
+# # Change all "1-" ratings to just a singular 1 valueand make numeric
+# 
+# all_merged_utm <- all_merged_utm %>%
+#   mutate_at(vars(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2")),~coalesce(., 0)) # change all NA's to 0
+
+all_merged_utm$infestation_sum_v2_focal <- all_merged_utm$NL_v2 + all_merged_utm$NM_v2 + all_merged_utm$NH_v2 + all_merged_utm$SL_v2 + all_merged_utm$SM_v2 + all_merged_utm$SH_v2
+
+all_merged_utm$infestation_sum_v3_focal <- all_merged_utm$NL_v3 + all_merged_utm$NM_v3 + all_merged_utm$NH_v3 + all_merged_utm$SL_v3 + all_merged_utm$SM_v3 + all_merged_utm$SH_v3
+
+all_merged_utm$infestation_sum_v4_focal <- all_merged_utm$NL_v4 + all_merged_utm$NM_v4 + all_merged_utm$NH_v4 + all_merged_utm$SL_v4 + all_merged_utm$SM_v4 + all_merged_utm$SH_v4
+
+```
+
+# Infestation as a binary
+
+```{r}
+# Time 1
+# all_merged_utm$`Inf Location_v1`[ all_merged_utm$`Inf Location_v1`== "-"] <- 0
+# all_merged_utm$`Inf Location_v1`[all_merged_utm$`Inf Location_v1` == "BO" | all_merged_utm$`Inf Location_v1` == "BR, BO" | all_merged_utm$`Inf Location_v1` == "BR"] <- 1
+# all_merged_utm$`Inf Location_v1`[is.na(all_merged_utm$`Inf Location_v1`)] <- 0 # change NA's to 0
+# all_merged_utm$`Inf Location_v1` <- as.numeric(all_merged_utm$`Inf Location_v1`)
+# unique(all_merged_utm$`Inf Location_v1`)
+# # Time 2
+# all_merged_utm$`Inf Location_v2`[ all_merged_utm$`Inf Location_v2`== "-"] <- 0
+# all_merged_utm$`Inf Location_v2`[all_merged_utm$`Inf Location_v2` == "BO" | all_merged_utm$`Inf Location_v2` == "BR, BO" | all_merged_utm$`Inf Location_v2` == "BR"] <- 1
+# all_merged_utm$`Inf Location_v2`[is.na(all_merged_utm$`Inf Location_v2`)] <- 0 # change NA's to 0
+# all_merged_utm$`Inf Location_v2` <- as.numeric(all_merged_utm$`Inf Location_v2`)
+# unique(all_merged_utm$`Inf Location_v2`)
+
+```
+
+# Function to extract info from target trees
+
+```{r}
+
+# Change names to make easier
+names(all_merged_utm)[12] <- "dead_alive"
+names(all_merged_utm)[15] <- "brooms"
+
+# Recode some things for extraction
+all_merged_utm$Species_v1 <- as.factor(all_merged_utm$Species_v1)
+
+# Make things!
+
+# BA in cubed meters or something
+all_merged_utm$DBH_v1 <- all_merged_utm$DBH_v1 * 2.54 # convert DBH to cm
+all_merged_utm <- mutate(all_merged_utm, BA = (0.00007854 * (DBH_v1 ^ 2)))
+
+# Crown Height in meters
+all_merged_utm$crown_height <- (all_merged_utm$Height_v1 - all_merged_utm$`Canopy Height_v1`) * 0.3048
+
+# Function to get distances for every tree 10m and under
+TEMP_DIST_10 = vegdist(all_merged_utm[,c("Longitude","Latitude")], method = "euclid")
+TEMP_DIST_10.df = as.data.frame(as.matrix(TEMP_DIST_10))
+rownames(TEMP_DIST_10.df) = (all_merged_utm$Name)
+colnames(TEMP_DIST_10.df) = (all_merged_utm$Name)
+TEMP_DIST_10.df$`Tag #` = rownames(TEMP_DIST_10.df)
+TEMP_DIST_MELT_10 = reshape2::melt(TEMP_DIST_10.df, id.vars = c("Tag #"))
+colnames(TEMP_DIST_MELT_10) = c("FROM", "TARGET", "DISTANCE")
+
+Holder_10 <- TEMP_DIST_MELT_10
+
+Holder_new_10 <- merge(Holder_10, all_merged_utm, by.x = "TARGET", by.y = "Name")
+all_merged_utm.dt <- as.data.table(Holder_new_10)
+
+# Get all trees under 10m from focal tree
+under10_holder <- all_merged_utm.dt[,.(TARGET, DISTANCE), by=.(FROM)][,.SD[which(DISTANCE <= 10 & DISTANCE != 0)], by=.(FROM)]
+
+# Distance to nearest infested neighbor
+min_dist_holder <- all_merged_utm.dt[infested_v1 == 1 ,.(TARGET, DISTANCE),by=.(FROM)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(FROM)]
+
+min_dist_holder <- min_dist_holder[, -2]
+
+names(min_dist_holder)[1] <- "Name"
+
+
+df <- under10_holder
+# Create a function to extract the variable based on the linked tree ID
+extractVariable <- function(TARGET, variable) {
+  linkedTreeRow <- all_merged_utm[all_merged_utm$Name == TARGET, ]
+  if (nrow(linkedTreeRow) > 0) {
+    return(linkedTreeRow[[variable]])
+  } else {
+    return(NA)  # or any other value to indicate missing data
+  }
+}
+
+str(all_merged_utm)
+
+# Apply the function to create a new column with the extracted variable - need to change function for each extraction !!
+df$infestation_under10 <- sapply(df$TARGET, extractVariable, variable = "infested_v1")
+df$infestation.sum.1_under10 <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v1_focal")
+df$dbh_under10 <- sapply(df$TARGET, extractVariable, variable = "DBH_v1")
+df$brooms_under10 <- sapply(df$TARGET, extractVariable, variable = "brooms")
+df$gouting_under10 <- sapply(df$TARGET, extractVariable, variable = "Gouting_v1")
+df$species_under10 <- sapply(df$TARGET, extractVariable, variable = "Species_v1")
+df$BA_under10 <- sapply(df$TARGET, extractVariable, variable = "BA")
+df$crown_ht__under10 <- sapply(df$TARGET, extractVariable, variable = "crown_height")
+df$dead_alive <- sapply(df$TARGET, extractVariable, variable = "dead_alive")
+
+# Host and non-host BA
+df$host_non <- if_else(df$species_under10 == "ABLA", 1, 0)
+
+# create a summary table of local stats for each tree
+local.stats <- df %>% 
+  dplyr::group_by(FROM) %>% 
+  dplyr::summarise(n = n(),
+                   number.infested_under10 = sum(infestation_under10), # number of infested
+                   percent.infested_under10 = (sum(infestation_under10)/n) * 100, # percent infested
+                   infestation.sum_under10 = sum(infestation.sum.1_under10), # infestation load or propagule pressure
+                   average.dbh_under10 = mean(dbh_under10, na.rm = TRUE), # average dbh
+                   brooms_under10 = sum(brooms_under10), # number of brooms (this may not be anything)
+                   # avg.gouting_under10 = mean(gouting_under10, na.rm = TRUE), # Since we only have 1's at EMIG, average isn't useful
+                   gouting.sum_under = sum(gouting_under10, na.rm = TRUE), # gouting sum
+                   basal_area_non_host = sum(BA_under10[!is.na(host_non) & host_non != 1], na.rm = TRUE), # non-host BA
+                   basal_area_host = sum(BA_under10[host_non == 1], na.rm = TRUE), # host BA
+                   percent_basal_area_non_host = basal_area_non_host / (basal_area_non_host + basal_area_host) * 100, # percent BA of non-host
+                   crown_ht_sum = sum(crown_ht__under10, na.rm = TRUE),
+                   mean_distance_infested = ifelse(sum(infestation_under10) == 0, NA, mean(DISTANCE[infestation_under10 == 1], na.rm = TRUE))) # If there's no infestation within 10m, it'll come out as NA 
+
+names(local.stats)[1] <- "Name"
+
+# combine with data
+data_with_local_stats <- all_merged_utm %>% inner_join(local.stats, by = "Name")
+
+# append nearest infested neighbor distance
+data_with_local_stats <- inner_join(data_with_local_stats, min_dist_holder, by = "Name")
+
+#write_xlsx(data_with_local_stats, "under10m_data.xlsx")
+```
+
+# Now we can set up a Bayesian Model
+
+We'll set up the probability of being infested by local and focal tree stats and see what ends up coming out
+
+```{r}
+data_with_local_stats <- read_xlsx("under10m_data.xlsx")
+# Filter out hosts to not skew infested metric
+host_local <- data_with_local_stats %>% filter(Species_v1 == "ABLA")
+
+pow <- function(base, exponent) {
+  return(base^exponent)
+}
+
+# Change NA DBH to 0.5
+host_local$DBH_v1[is.na(host_local$DBH_v1)] <- 2.54/2
+host_local$Gouting_v1[is.na(host_local$Gouting_v1)] <- 0
+
+# Change NA's in mean distance infested to 0 - this is just to get it to run!! - NEED TO CHANGE FOR FINAL MODEL - 0 might be right since I think we're getting NA's because there's no infested within 10 meters
+host_local$mean_distance_infested[is.na(host_local$mean_distance_infested)] <- 0
+
+# Check for NA's
+
+na_subset <- host_local[, c("infested_v1", "DISTANCE", "DBH_v1", "Gouting_v1", "brooms", "infestation.sum_under10", "mean_distance_infested", "percent_basal_area_non_host", "basal_area_host", "average.dbh_under10", "number.infested_under10", "percent.infested_under10", "crown_ht_sum", "Name"), drop = FALSE]
+
+# Check for NA values in each specified column
+na_count <- colSums(is.na(na_subset))
+
+# General linear setup
+
+# newinflog <- glm(cbind(new_infested, 1 - new_infested) ~
+#                    DISTANCE + logDBH + Gouting_v1 + `Broom (#)_v1` + broom_binary + bearings1 + logInfestsum,
+#                    data = live_host,
+#                    family = binomial(link = "logit"))
+
+# Trying without RE of tree to try to get this to run
+
+host_local$crown_ht_sum_std <- (host_local$crown_ht_sum - mean(host_local$crown_ht_sum))/sd(host_local$crown_ht_sum)
+host_local$infest_sum_10_std <- (host_local$infestation.sum_under10 - mean(host_local$infestation.sum_under10))/sd(host_local$infestation.sum_under10)
+host_local$basal_area_host_std <- (host_local$basal_area_host - mean(host_local$basal_area_host))/sd(host_local$basal_area_host)
+
+infested_jags_data_re <- list(infested = host_local$infested_v1, 
+                            logDISTANCE = log(host_local$DISTANCE),
+                            # note that we have to convert the FoodTreatment factor to
+                            # a number to work appropriately in JAGS. Also, numeric coding needs to start at 0, not 1
+                            DBH_focal = log(host_local$DBH_v1), 
+                            Gouting_focal = host_local$Gouting_v1,
+                            Brooms_focal = host_local$brooms,
+                            infest_sum_10 = host_local$infest_sum_10_std,
+                            mean_dist_infest_10 = host_local$mean_distance_infested,
+                            # non_host_ba_perc = host_local$percent_basal_area_non_host,
+                            host_ba = host_local$basal_area_host_std,
+                            # avg_dbh_10 = host_local$average.dbh_under10,
+                            n_infest_10 = host_local$number.infested_under10,
+                            percent_infested_10 = host_local$percent.infested_under10,
+                            # crown_ht_sum = host_local$crown_ht_sum_std,
+                            tree = as.numeric(as.factor(host_local$Name)),
+                            N = nrow(host_local)
+                            , N_tree = length(levels(factor(host_local$Name)))
+                                                              )
+# Model
+infested_jags_naive_re <- function(){
+  # Priors:
+  beta_0 ~ dnorm(0, 0.5) # intercept (use diffuse normal just as we would for standard regression)
+  beta_distance ~ dnorm(0, 0.5) # slope (use diffuse normal just as we would for standard regression)
+  beta_dbh ~ dnorm(0, 0.5)
+  beta_gouting ~ dnorm(0, 0.5)
+  beta_brooms ~ dnorm(0, 0.5)
+  beta_infestsum ~ dnorm(0, 0.5)
+  beta_mean_dist_infest ~ dnorm(0, 0.5)
+  #beta_non_host_ba_perc ~ dnorm(0, 0.5)
+  beta_host_ba ~ dnorm(0, 0.5)
+  # beta_avg_dbh ~ dnorm(0, 0.5)
+  beta_n_infest ~ dnorm(0, 0.5)
+  beta_percent_infest ~ dnorm(0, 0.5)
+  # beta_crown_ht ~ dnorm(0, 0.5)
+  
+  for(t in 1:N_tree){
+    beta_tree[t] ~ dnorm(0, tau_tree)
+  }
+  
+  sigma_sq_tree ~ dunif(0, 100) # here's my prior for tree
+  tau_tree <- pow(sigma_sq_tree,-2) # here, I'm converting from that variance to the precision (tau = 1/sqrt(var))
+  
+  # Likelihood:
+  for (i in 1:N){
+    lin_comb[i] <- beta_0 + (beta_distance * logDISTANCE[i]) + (beta_dbh * DBH_focal[i]) +
+      (beta_gouting * Gouting_focal[i]) + (beta_brooms * Brooms_focal[i]) + (beta_infestsum * infest_sum_10[i]) + (beta_mean_dist_infest * mean_dist_infest_10[i]) + (beta_host_ba * host_ba[i])+ beta_n_infest * n_infest_10[i] + beta_percent_infest * percent_infested_10[i]
+    #+ beta_non_host_ba_perc * non_host_ba_perc[i] + beta_host_ba * host_ba[i] + beta_avg_dbh * avg_dbh_10[i]  + beta_crown_ht * crown_ht_sum[i] + (beta_non_host_ba_perc * non_host_ba_perc[i])
+    + beta_tree[tree[i]]
+    # here's our linear combination of predictors, just like in a standard regression
+    
+     p[i] <- exp(lin_comb[i])/(1 + exp(lin_comb[i]))
+    infested[i] ~ dbinom(p[i], 1) # Here's the Binomial likelihood,
+  }
+}
+
+infested_inits_re <- function(){
+  list(beta_0 = rnorm(1, 0, 1), 
+       beta_distance = rnorm(1, 0, 1),
+       beta_dbh = rnorm(1, 0, 1),
+       beta_gouting = rnorm(1, 0, 1),
+       beta_brooms = rnorm(1, 0, 1),
+       beta_infestsum = rnorm(1, 0, 1),
+       beta_mean_dist_infest = rnorm(1, 0, 1),
+       #beta_non_host_ba_perc = rnorm(1, 0, 1),
+       beta_host_ba = rnorm(1, 0, 1),
+       # beta_avg_dbh = rnorm(1, 0, 1),
+       beta_n_infest = rnorm(1, 0, 1),
+       beta_percent_infest = rnorm(1, 0, 1),
+       # beta_crown_ht = rnorm(1, 0, 1))
+    #,
+       beta_tree = rep(0, length(levels(factor(host_local$Name)))))
+      # p = runif(1, 0.1, 0.9))
+}
+
+ infested_params_re <- c("beta_0", "beta_distance", "beta_dbh", "beta_gouting", "beta_brooms", "beta_infestsum",
+   "beta_mean_dist_infest", "beta_host_ba", "beta_n_infest", "beta_percent_infest",# "beta_non_host_ba_perc", "beta_avg_dbh",  "beta_crown_ht",
+   "sigma_sq_tree",
+   "p")
+
+infested_fit_naive_re <- jags(data = infested_jags_data_re, 
+                            inits = infested_inits_re, 
+                            parameters.to.save = infested_params_re, 
+                            model.file = infested_jags_naive_re,
+                            n.chains = 3,
+                            n.iter = 12000, 
+                            n.burnin = 2000, 
+                            n.thin = 10, 
+                            DIC = F)
+
+mcmcplots::mcmcplot(infested_fit_naive_re)
+
+infested_fit_naive_re
+
+intensity.glm <- glmmTMB(infestation_sum_v1_focal ~ 
+                      logDISTANCE + DBH_v1 + Gouting_v1 + `Broom (#)_v1` + (1|site),
+                      family = nbinom1,
+                      data = live_host)
+
+confint(intensity.glm) 
+# These intervals are pretty close to the 2.5th and 97.5th quantiles of beta_food 
+# and beta_parent in our Bayesian model. 
+
+# check for convergence
+traceplot(intensity_fit_naive_re, mfrow = c(2, 2), ask = F)
+
+dev.off()
+
+intensity_mcmc_re <- as.mcmc(intensity_fit_naive_re)
+plot(intensity_mcmc_re)
+
+```
+
+# Regular GLM model
+
+Since we're getting local stats and are doing a Bayesian implementation, we should do a regular GLM and see what comes out
+
+```{r}
+
+emig.inf <- glm(cbind(infested_v1, 1 - infested_v1) ~ DISTANCE + DBH_v1 + Gouting_v1 + brooms + number.infested_under10 + percent.infested_under10 + infestation.sum_under10 + average.dbh_under10 + basal_area_non_host + percent_basal_area_non_host + mean_distance_infested, data = host_local, family = binomial(link = "logit"))
+
+inf.sims <- simulateResiduals(emig.inf)
+plot(inf.sims)
+
+summary(emig.inf)
+
+```
+
+# Bayesian Model for all sites
+
+```{r}
+all_sites <- read_xlsx("under10m_data.xlsx")
+
+# Host and non-host BA
+df$host_non <- if_else(df$species_under10 == "ABLA", 1, 0)
+
+# create a summary table of local stats for each tree
+local.stats <- df %>% 
+  dplyr::group_by(FROM) %>% 
+  dplyr::summarise(n = n(),
+                   number.infested_under10 = sum(infestation_under10), # number of infested
+                   percent.infested_under10 = (sum(infestation_under10)/n) * 100, # percent infested
+                   infestation.sum_under10 = sum(infestation.sum.1_under10), # infestation load or propagule pressure
+                   average.dbh_under10 = mean(dbh_under10, na.rm = TRUE), # average dbh
+                   brooms_under10 = sum(brooms_under10), # number of brooms (this may not be anything)
+                   # avg.gouting_under10 = mean(gouting_under10, na.rm = TRUE), # Since we only have 1's at EMIG, average isn't useful
+                   gouting.sum_under = sum(gouting_under10, na.rm = TRUE), # gouting sum
+                   basal_area_non_host = sum(BA_under10[!is.na(host_non) & host_non != 1], na.rm = TRUE), # non-host BA
+                   basal_area_host = sum(BA_under10[host_non == 1], na.rm = TRUE), # host BA
+                   percent_basal_area_non_host = basal_area_non_host / (basal_area_non_host + basal_area_host) * 100, # percent BA of non-host
+                   crown_ht_sum = sum(crown_ht__under10, na.rm = TRUE),
+                   mean_distance_infested = ifelse(sum(infestation_under10) == 0, NA, mean(DISTANCE[infestation_under10 == 1], na.rm = TRUE))) # If there's no infestation within 10m, it'll come out as NA 
+
+names(local.stats)[1] <- "Name"
+
+# combine with data
+data_with_local_stats <- all_merged_utm %>% inner_join(local.stats, by = "Name")
+
+# append nearest infested neighbor distance
+data_with_local_stats <- inner_join(data_with_local_stats, min_dist_holder, by = "Name")
+
+
+
+# Change NA DBH to 0.5
+all_sites$dbh[is.na(all_sites$dbh)] <- 2.54/2
+all_sites$Gouting_v1[is.na(all_sites$Gouting_v1)] <- 0
+
+# Change NA's in mean distance infested to 0 - this is just to get it to run!! - NEED TO CHANGE FOR FINAL MODEL - 0 might be right since I think we're getting NA's because there's no infested within 10 meters
+all_sites$mean_distance_infested[is.na(all_sites$mean_distance_infested)] <- 0
+
+# Check for NA's
+
+na_subset <- all_sites[, c("infested_v1", "DISTANCE", "dbh", "Gouting_v1", "brooms", "infestation.sum_under10", "mean_distance_infested", "percent_basal_area_non_host", "basal_area_host", "average.dbh_under10", "number.infested_under10", "percent.infested_under10", "crown_ht_sum", "Name"), drop = FALSE]
+
+# Check for NA values in each specified column
+na_count <- colSums(is.na(na_subset))
+
+# General linear setup
+
+# newinflog <- glm(cbind(new_infested, 1 - new_infested) ~
+#                    DISTANCE + logDBH + Gouting_v1 + `Broom (#)_v1` + broom_binary + bearings1 + logInfestsum,
+#                    data = live_host,
+#                    family = binomial(link = "logit"))
+
+# Trying without RE of tree to try to get this to run
+
+all_sites$crown_ht_sum_std <- (all_sites$crown_ht_sum - mean(all_sites$crown_ht_sum))/sd(all_sites$crown_ht_sum)
+all_sites$infest_sum_10_std <- (all_sites$infestation.sum_under10 - mean(all_sites$infestation.sum_under10))/sd(all_sites$infestation.sum_under10)
+all_sites$basal_area_host_std <- (all_sites$basal_area_host - mean(all_sites$basal_area_host))/sd(all_sites$basal_area_host)
+
+infested_jags_data_re <- list(infested = all_sites$infested_v1, 
+                            logDISTANCE = log(all_sites$DISTANCE),
+                            # note that we have to convert the FoodTreatment factor to
+                            # a number to work appropriately in JAGS. Also, numeric coding needs to start at 0, not 1
+                            DBH_focal = log(all_sites$dbh), 
+                            Gouting_focal = all_sites$Gouting_v1,
+                            Brooms_focal = all_sites$brooms,
+                            infest_sum_10 = all_sites$infest_sum_10_std,
+                            mean_dist_infest_10 = all_sites$mean_distance_infested,
+                            # non_host_ba_perc = all_sites$percent_basal_area_non_host,
+                            host_ba = all_sites$basal_area_host_std,
+                            # avg_dbh_10 = all_sites$average.dbh_under10,
+                            n_infest_10 = all_sites$number.infested_under10,
+                            percent_infested_10 = all_sites$percent.infested_under10,
+                            # crown_ht_sum = all_sites$crown_ht_sum_std,
+                            tree = as.numeric(as.factor(all_sites$Name)),
+                            N = nrow(all_sites)
+                            , N_tree = length(levels(factor(all_sites$Name)))
+                                                              )
+# Model
+infested_jags_naive_re <- function(){
+  # Priors:
+  beta_0 ~ dnorm(0, 0.5) # intercept (use diffuse normal just as we would for standard regression)
+  beta_distance ~ dnorm(0, 0.5) # slope (use diffuse normal just as we would for standard regression)
+  beta_dbh ~ dnorm(0, 0.5)
+  beta_gouting ~ dnorm(0, 0.5)
+  beta_brooms ~ dnorm(0, 0.5)
+  beta_infestsum ~ dnorm(0, 0.5)
+  beta_mean_dist_infest ~ dnorm(0, 0.5)
+  #beta_non_host_ba_perc ~ dnorm(0, 0.5)
+  beta_host_ba ~ dnorm(0, 0.5)
+  # beta_avg_dbh ~ dnorm(0, 0.5)
+  beta_n_infest ~ dnorm(0, 0.5)
+  beta_percent_infest ~ dnorm(0, 0.5)
+  # beta_crown_ht ~ dnorm(0, 0.5)
+  
+  for(t in 1:N_tree){
+    beta_tree[t] ~ dnorm(0, tau_tree)
+  }
+  
+  sigma_sq_tree ~ dunif(0, 100) # here's my prior for tree
+  tau_tree <- pow(sigma_sq_tree,-2) # here, I'm converting from that variance to the precision (tau = 1/sqrt(var))
+  
+  # Likelihood:
+  for (i in 1:N){
+    lin_comb[i] <- beta_0 + (beta_distance * logDISTANCE[i]) + (beta_dbh * DBH_focal[i]) +
+      (beta_gouting * Gouting_focal[i]) + (beta_brooms * Brooms_focal[i]) + (beta_infestsum * infest_sum_10[i]) + (beta_mean_dist_infest * mean_dist_infest_10[i]) + (beta_host_ba * host_ba[i])+ beta_n_infest * n_infest_10[i] + beta_percent_infest * percent_infested_10[i]
+    #+ beta_non_host_ba_perc * non_host_ba_perc[i] + beta_host_ba * host_ba[i] + beta_avg_dbh * avg_dbh_10[i]  + beta_crown_ht * crown_ht_sum[i] + (beta_non_host_ba_perc * non_host_ba_perc[i])
+    + beta_tree[tree[i]]
+    # here's our linear combination of predictors, just like in a standard regression
+    
+     p[i] <- exp(lin_comb[i])/(1 + exp(lin_comb[i]))
+    infested[i] ~ dbinom(p[i], 1) # Here's the Binomial likelihood,
+  }
+}
+
+infested_inits_re <- function(){
+  list(beta_0 = rnorm(1, 0, 1), 
+       beta_distance = rnorm(1, 0, 1),
+       beta_dbh = rnorm(1, 0, 1),
+       beta_gouting = rnorm(1, 0, 1),
+       beta_brooms = rnorm(1, 0, 1),
+       beta_infestsum = rnorm(1, 0, 1),
+       beta_mean_dist_infest = rnorm(1, 0, 1),
+       #beta_non_host_ba_perc = rnorm(1, 0, 1),
+       beta_host_ba = rnorm(1, 0, 1),
+       # beta_avg_dbh = rnorm(1, 0, 1),
+       beta_n_infest = rnorm(1, 0, 1),
+       beta_percent_infest = rnorm(1, 0, 1),
+       # beta_crown_ht = rnorm(1, 0, 1))
+    #,
+       beta_tree = rep(0, length(levels(factor(all_sites$Name)))))
+      # p = runif(1, 0.1, 0.9))
+}
+
+ infested_params_re <- c("beta_0", "beta_distance", "beta_dbh", "beta_gouting", "beta_brooms", "beta_infestsum",
+   "beta_mean_dist_infest", "beta_host_ba", "beta_n_infest", "beta_percent_infest",# "beta_non_host_ba_perc", "beta_avg_dbh",  "beta_crown_ht",
+   "sigma_sq_tree",
+   "p")
+
+infested_fit_naive_re <- jags(data = infested_jags_data_re, 
+                            inits = infested_inits_re, 
+                            parameters.to.save = infested_params_re, 
+                            model.file = infested_jags_naive_re,
+                            n.chains = 3,
+                            n.iter = 12000, 
+                            n.burnin = 2000, 
+                            n.thin = 10, 
+                            DIC = F)
+
+mcmcplots::mcmcplot(infested_fit_naive_re)
+```

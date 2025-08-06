@@ -1,0 +1,358 @@
+---
+title: "Point Patterns"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Point Pattern Set-up
+11/13/23
+Michael Wayman
+
+Point-pattern set-up in association with Dispersal of Balsam Woolly Adelgid in the Intermountain Region. The goal is to attain point-pattern objects which can then be analyzed for every study site:
+
+1. Produce point pattern objects (ppp's) for every study site for all available trees.
+    Caveat: At time of creation, non-hosts are not available for 5/8 sites. Sites with all tree data are Cox Springs (CXSP),                  Emigration Canyon (EMIG), and Smith and Morehouse (SMMH)
+    a. Combine GPS points with all of our available data(For most sites we'll use our most recent visit as that will be our most        comprehensive view of what we have on the landscape - some trees and associated points will be dropped from previous             visit)
+    
+2. Locate any trees that still need to be located and GPS points taken.
+
+At the end, we will have point patterns for five sites with just host data, while the three mentioned above will have host and non-host. This will allow us later on to run both types of analyses and then once our full dataset is in next year, we can combine non-host trees and have our models set up and tested already.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(Rcpp)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(reshape2)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(rfishnet2) # lets us do a spatial search - so clutch
+library(sf)
+library(spatstat)
+```
+
+## Data
+
+```{r, echo = F, warning=F}
+most_points = read.csv("all_points.csv", header = T)
+rest_of_points <- read.csv("rest_of_points.csv", header = T)
+point24 <- read.csv("waypoints2024.csv", header = T)
+data = readxl::read_xlsx("combined_cleaned2.xlsx")
+finalpoints <- read.csv("final_points.csv", header = T)
+points <- most_points %>% bind_rows(rest_of_points) %>% bind_rows(point24) %>% bind_rows(finalpoints)
+#write_xlsx(points, "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/all_points_except_outliers.xlsx")
+```
+
+We want to get points for all of our trees that we'll be looking at. Some trees have been dropped from the first visit, so let's get all of our trees from the second visit unless we're including non-hosts from the first visit. Be aware that there may be trees without points if they've been added on the second visit. Let's not these so that we can take their location on our next visit in 2024.
+
+** At this point we should have points for all trees we're using in analysis. If we don't have a point, we need to go out and get it or drop the tree.
+
+Get data ready for combination by changing class where needed and extracting sets that we need
+
+```{r}
+head(points)
+points <- points %>% select(-c(1, 3, 4, 8)) # Drop columns not needed for clarity
+head(data)
+str(data)
+str(points)
+data$`Tag #` <- as.character(data$`Tag #`) # change tree to chr for combination
+# At this point, run the sites again to get Tag # as character and not number
+```
+
+```{r}
+unique(data$`Site ID`)
+CXSP <- data %>% filter(`Site ID` == "CXSP" & Visit == 4) # 4th visit should have all of our trees included
+EMIG <- data %>% filter(`Site ID` == "EMIG" & Visit == 4) 
+SMMH <- data %>% filter(`Site ID` == "SMMH" & Visit == 4) 
+FRNK <- data %>% filter(`Site ID` == "FRNK" & Visit == 4)
+MOCR <- data %>% filter(`Site ID` == "MOCR" & Visit == 4)
+MTTP <- data %>% filter(`Site ID` == "MTTP" & Visit == 4)
+SOAP <- data %>% filter(`Site ID` == "SOAP" & Visit == 4)
+TMPF <- data %>% filter(`Site ID` == "TMPF" & Visit == 4)
+
+```
+
+So now we just need to extract points for each of the sites listed above so we can then append these points to the data. To do this we can use the spatial search function - Be aware that the points used in the following code is **proximal** to the site, not on the site itself.
+
+```{r}
+cxsp_points <- spatial_search(points, 41.641310, -111.491606, 1) # search 1km around point found
+ggplot(cxsp_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point() # check that it worked - hell yes spatial search
+
+#write_xlsx(cxsp_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/cxsp_points.xlsx")
+
+emig_points <- spatial_search(points, 42.375017, -111.555346, 1)
+ggplot(emig_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(emig_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/emig_points.xlsx")
+
+smmh_points <- spatial_search(points, 40.769878, -111.107718, 1)
+ggplot(smmh_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(smmh_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/smmh_points.xlsx")
+
+frnk_points <- spatial_search(points, 41.933229, -111.570967, 1) # search 1km around point found
+ggplot(frnk_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(frnk_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/frnk_points.xlsx")
+
+mocr_points <- spatial_search(points, 41.409149, -111.532901, 1) # search 1km around point found
+ggplot(mocr_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(mocr_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/mocr_points.xlsx")
+
+mttp_points <- spatial_search(points, 40.435067, -111.638473, 1) # search 1km around point found
+ggplot(mttp_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(mttp_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/mttp_points.xlsx")
+
+soap_points <- spatial_search(points, 40.546185, -111.029622, 1) # search 1km around point found
+ggplot(soap_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(soap_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/soap_points.xlsx")
+
+tmpf_points <- spatial_search(points, 41.798592, -111.518826, 1) # search 1km around point found
+ggplot(tmpf_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+#write_xlsx(tmpf_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/tmpf_points.xlsx")
+
+
+## After fixing some points, here's final points for each site
+
+cxsp_points <- read_xlsx("cxsp_points.xlsx")
+emig_points <- read_xlsx("emig_points.xlsx")
+smmh_points <- read_xlsx("smmh_points.xlsx")
+frnk_points <- read_xlsx("frnk_points.xlsx")
+mocr_points <- read_xlsx("mocr_points.xlsx")
+mttp_points <- read_xlsx("mttp_points.xlsx")
+soap_points <- read_xlsx("soap_points.xlsx")
+tmpf_points <- read_xlsx("tmpf_points.xlsx")
+
+```
+Let's now try to combine our point objects with our data objects using Tag # as our "hinge"
+
+## Cox Spring
+
+```{r}
+# So this issue will be common, points are named as species and genus epithets with the number tagged on the end, while in our data, it's separated into two variables. The easiest way to fix this seems to be to change our data to reflect our points. So we'll take our species column, make it lowercase, and then attach it to our Tag # column before the number
+
+CXSP$Species <- CXSP$Species %>% stringr::str_to_lower() # change species to lower case
+CXSP <- CXSP %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = ""))) # we're connecting tag # with non-hosts and leaving hosts alone - now we should be able to combine by Name
+
+cxsp_combined <- cxsp_points %>% full_join(CXSP, by = "Name")
+cxsp_needs_gps <- cxsp_combined %>% filter(is.na(Latitude))
+#cxsp_gps_list <- cxsp_needs_gps$Name
+
+# manually fix psmeg2, we need to go get 1301 (Big sad, much bummed)
+cxsp_combined$Latitude[cxsp_combined$Name == "psmeg2" & cxsp_combined$`Site ID` == "CXSP" ] <- 41.64150606
+cxsp_combined$Longitude[cxsp_combined$Name == "psmeg2" & cxsp_combined$`Site ID` == "CXSP" ] <- -111.4921261
+cxsp_combined$Elevation[cxsp_combined$Name == "psmeg2" & cxsp_combined$`Site ID` == "CXSP" ] <- 2244.857
+
+cxsp_combined <- cxsp_combined %>% tidyr::drop_na(`Site ID`)
+
+```
+This gives us a file that allows us to do a few things.
+
+- We can filter out any points that don't have a site (& data) because these are extranneous points that we are not using anymore.
+- Find all the trees we missed GPS'ing (these points will have data, but no associated point - possible that points are mislabelled - we need to check this)
+
+## Emigration Canyon
+
+```{r}
+EMIG$Species <- EMIG$Species %>% stringr::str_to_lower() # change species to lower case
+EMIG <- EMIG %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+
+emig_combined <- emig_points %>% full_join(EMIG, by = "Name")
+
+emig_needs_gps <- emig_combined %>% filter(is.na(Latitude))
+emig_gps_list <- emig_needs_gps$Name
+```
+
+## Smith and Morehouse
+
+
+```{r}
+SMMH$Species <- SMMH$Species %>% stringr::str_to_lower()
+SMMH <- SMMH %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species == "abco" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+smmh_combined <- smmh_points %>% full_join(SMMH, by = "Name")
+
+smmh_needs_gps <- smmh_combined %>% filter(is.na(Latitude))
+smmh_gps_list <- smmh_needs_gps$Name
+```
+
+## Franklin Basin
+
+```{r}
+FRNK$Species <- FRNK$Species %>% stringr::str_to_lower()
+FRNK <- FRNK %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species == "abco" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+frnk_combined <- frnk_points %>% full_join(FRNK, by = "Name") 
+frnk_combined <- frnk_combined[!is.na(frnk_combined$`Site ID`),] # drop NA's
+
+frnk_needs_gps <- frnk_combined %>% filter(is.na(Latitude))
+frnk_gps_list <- frnk_needs_gps$Name
+
+frnk_combined$Latitude[frnk_combined$Name == "potr27" & frnk_combined$`Site ID` == "FRNK" ] <- 41.93353411
+frnk_combined$Longitude[frnk_combined$Name == "potr27" & frnk_combined$`Site ID` == "FRNK" ] <- -111.5714332
+frnk_combined$Elevation[frnk_combined$Name == "potr27" & frnk_combined$`Site ID` == "FRNK" ] <- 2056.915
+```
+
+## Monte Cristo
+
+```{r}
+MOCR$Species <- MOCR$Species %>% stringr::str_to_lower()
+MOCR <- MOCR %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species == "abco" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+mocr_combined <- mocr_points %>% full_join(MOCR, by = "Name") 
+mocr_combined <- mocr_combined[!is.na(mocr_combined$`Species`),] # drop NA's
+
+mocr_needs_gps <- mocr_combined %>% filter(is.na(Latitude))
+mocr_gps_list <- mocr_needs_gps$Name
+```
+
+## Mount Timpanogos
+
+```{r}
+MTTP$Species <- MTTP$Species %>% stringr::str_to_lower()
+MTTP <- MTTP %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species == "abco" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+mttp_combined <- mttp_points %>% full_join(MTTP, by = "Name")
+
+mttp_needs_gps <- mttp_combined %>% filter(is.na(Latitude))
+```
+
+## Soapstone Basin
+
+```{r}
+SOAP$Species <- SOAP$Species %>% stringr::str_to_lower()
+soap_points$Name <- soap_points$Name %>% stringr::str_to_lower() # fixed one Potr mistake with capital P
+SOAP <- SOAP %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species == "abco" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+soap_combined <- soap_points %>% full_join(SOAP, by = "Name")
+soap_combined <- soap_combined[!is.na(soap_combined$`Site ID`),] # drop NA's
+
+soap_needs_gps <- soap_combined %>% filter(is.na(Latitude))
+soap_gps_list <- soap_needs_gps$Name
+```
+
+## Temple Fork
+
+```{r}
+TMPF$Species <- TMPF$Species %>% stringr::str_to_lower()
+tmpf_points$Name <- tmpf_points$Name %>% stringr::str_to_lower()
+TMPF <- TMPF %>% mutate(Name = case_when(Species == "abla" ~ `Tag #`,
+                                         Species == "abco" ~ `Tag #`,
+                                         Species != "abla" ~ paste(Species, `Tag #`, sep = "")))
+tmpf_combined <- tmpf_points %>% full_join(TMPF, by = "Name")
+
+tmpf_combined <- tmpf_combined[!is.na(tmpf_combined$`Site ID`),] # drop NA's
+
+tmpf_needs_gps <- tmpf_combined %>% filter(is.na(Latitude))
+
+# Manually fix a point
+tmpf_combined$Latitude[tmpf_combined$Name == "psmeg244" & tmpf_combined$`Site ID` == "TMPF" ] <- 41.79830496
+tmpf_combined$Longitude[tmpf_combined$Name == "psmeg244" & tmpf_combined$`Site ID` == "TMPF" ] <- -111.5192254
+tmpf_combined$Elevation[tmpf_combined$Name == "psmeg244" & tmpf_combined$`Site ID` == "TMPF" ] <- 2386.828
+```
+
+# Point Pattern Creation
+
+We can only use trees that we have points for so we'll filter out anything without a point and then create our point pattern objects.
+
+```{r}
+cxsp_combined <- cxsp_combined[!is.na(cxsp_combined$Latitude),] # drop anything without a GPS point
+emig_combined <- emig_combined[!is.na(emig_combined$Latitude),]
+frnk_combined <- frnk_combined[!is.na(frnk_combined$Latitude),]
+mocr_combined <- mocr_combined[!is.na(mocr_combined$Latitude),]
+mttp_combined <- mttp_combined[!is.na(mttp_combined$Latitude),]
+smmh_combined <- smmh_combined[!is.na(smmh_combined$Latitude),]
+soap_combined <- soap_combined[!is.na(soap_combined$Latitude),]
+tmpf_combined <- tmpf_combined[!is.na(tmpf_combined$Latitude),] 
+```
+
+I'm gonna try to combine all points and then make a point pattern with this
+```{r}
+all_site_points <- cxsp_combined %>% 
+                   bind_rows(emig_combined) %>% 
+                   bind_rows(frnk_combined) %>% 
+                   bind_rows(mocr_combined) %>% 
+                   bind_rows(mttp_combined) %>% 
+                   bind_rows(smmh_combined) %>% 
+                   bind_rows(soap_combined) %>% 
+                   bind_rows(tmpf_combined)
+#write_xlsx(all_site_points, "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/all_sites_with_points.xlsx")
+
+ggplot() +
+  geom_point(data = all_site_points,
+             aes(x = Latitude,
+                 y = Longitude)) +
+  facet_wrap(~ `Site ID`) +
+  coord_fixed()
+# What we end up getting is the point pattern, but since they are all put in the same viewing window, our plots appear as a single point
+```
+
+```{r}
+Wnd_fx <- function(x){
+  owin(c(min(x$Latitude),max(x$Latitude)), c(min(x$Longitude),max(x$Longitude)))
+}
+
+Wnd_cxsp <- Wnd_fx(cxsp_combined) # create windows for our point patterns to sit in
+Wnd_emig <- Wnd_fx(emig_combined)
+Wnd_frnk <- Wnd_fx(frnk_combined)
+Wnd_mocr <- Wnd_fx(mocr_combined)
+Wnd_mttp <- Wnd_fx(mttp_combined)
+Wnd_smmh <- Wnd_fx(smmh_combined)
+Wnd_soap <- Wnd_fx(soap_combined)
+
+cxsp_ppp <- ppp(cxsp_combined$Latitude, cxsp_combined$Longitude,Wnd_cxsp, check = TRUE, checkdup = TRUE) # create point pattern
+emig_ppp <- ppp(emig_combined$Latitude, emig_combined$Longitude,Wnd_emig, check = TRUE, checkdup = TRUE)
+frnk_ppp <- ppp(frnk_combined$Latitude, frnk_combined$Longitude,Wnd_frnk, check = TRUE, checkdup = TRUE)
+mocr_ppp <- ppp(mocr_combined$Latitude, mocr_combined$Longitude,Wnd_mocr, check = TRUE, checkdup = TRUE)
+mttp_ppp <- ppp(mttp_combined$Latitude, mttp_combined$Longitude,Wnd_mttp, check = TRUE, checkdup = TRUE)
+smmh_ppp <- ppp(smmh_combined$Latitude, smmh_combined$Longitude,Wnd_smmh, check = TRUE, checkdup = TRUE)
+soap_ppp <- ppp(soap_combined$Latitude, soap_combined$Longitude,Wnd_soap, check = TRUE, checkdup = TRUE)
+
+```
+They look a little weird, but we have point patterns for all of our sites.

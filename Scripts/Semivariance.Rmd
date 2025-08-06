@@ -1,0 +1,279 @@
+---
+title: "Semivariance / Autocorrelation"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Semivariance and autocorrelation Indices
+11/15/23
+Michael Wayman
+
+
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+```
+
+# Cox Spring Semivariance
+
+Getting semivariance allows us to select an appropriate spatial model for spatial interpolation by understanding how correlated our points are spatially.
+
+```{r}
+variogram_lowercase_fx <- function(x){
+host <- x %>% filter(Species == "abla" | Species == "abco")
+live_host <- host %>% filter(`Dead / Alive` == 1)
+
+## we need to run this code again to get binary infestation again
+live_host$`Inf Location`[live_host$`Inf Location`== "-"] <- 0
+unique(live_host$`Inf Location`)
+live_host$`Inf Location`[live_host$`Inf Location` == "BO" | live_host$`Inf Location` == "BR, BO"] <- 1
+live_host$`Inf Location` <- as.numeric(live_host$`Inf Location`)
+
+Lats <- live_host$Latitude # create latitude vector
+Longs <- live_host$Longitude # create longitude vector
+
+coordinates <- live_host[, c("Latitude", "Longitude")] # create coordinate dataframe
+infestation <- live_host$`Inf Location`
+
+# Create a SpatialPointsDataFrame
+tree_sp <- SpatialPointsDataFrame(coords = coordinates, data = data.frame(infestation), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_model <- variogram(infestation ~ 1, data = tree_sp)
+
+# Plot the variogram
+plot(variogram_model)
+
+variogram_model_fit <- fit.variogram(variogram_model, model = vgm(1, "Exp"))
+
+plot<-plot(variogram_model, model = variogram_model_fit)
+summary(variogram_model)
+
+# Extract the range, sill, and nugget
+range_value <- variogram_model_fit$range
+sill_value <- variogram_model_fit$sill
+nugget_value <- variogram_model_fit$nugget
+
+# Print the values
+cat("Range:", range_value, "\n")
+
+# Calculate nugget and sill from the partial sill
+nugget_value <- variogram_model_fit$psill - variogram_model_fit$range
+sill_value <- variogram_model_fit$psill
+
+# Print the values
+cat("Nugget:", nugget_value, "\n")
+cat("Sill:", sill_value, "\n")
+return(plot)
+}
+
+variogram_lowercase_fx(cxsp_combined)
+```
+
+# Emigration Canyon Semivariance
+
+```{r}
+host <- emig_combined %>% filter(Species == "abla" | Species == "abco")
+live_host <- host %>% filter(`Dead / Alive` == 1)
+
+## we need to run this code again to get binary infestation again
+live_host$`Inf Location`[live_host$`Inf Location`== "-"] <- 0
+live_host$`Inf Location`[is.na(live_host$`Inf Location`)] <- 0
+unique(live_host$`Inf Location`)
+live_host$`Inf Location`[live_host$`Inf Location` == "BO" | live_host$`Inf Location` == "BR, BO" | live_host$`Inf Location` == "BR"] <- 1
+live_host$`Inf Location` <- as.numeric(live_host$`Inf Location`)
+
+Lats <- live_host$Latitude # create latitude vector
+Longs <- live_host$Longitude # create longitude vector
+
+coordinates <- live_host[, c("Latitude", "Longitude")] # create coordinate dataframe
+infestation <- live_host$`Inf Location`
+
+# Create a SpatialPointsDataFrame
+tree_sp <- SpatialPointsDataFrame(coords = coordinates, data = data.frame(infestation), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_model <- variogram(infestation ~ 1, data = tree_sp)
+
+# Plot the variogram
+plot(variogram_model)
+
+variogram_model_fit <- fit.variogram(variogram_model, model = vgm(1, "Exp"))
+
+plot(variogram_model, model = variogram_model_fit)
+summary(variogram_model)
+summary(variogram_model_fit)
+
+# Extract the range, sill, and nugget
+range_value <- variogram_model_fit$range
+sill_value <- variogram_model_fit$sill
+nugget_value <- variogram_model_fit$nugget
+
+# Print the values
+cat("Range:", range_value, "\n")
+
+# Calculate nugget and sill from the partial sill
+nugget_value <- variogram_model_fit$psill - variogram_model_fit$range
+sill_value <- variogram_model_fit$psill
+
+# Print the values
+cat("Nugget:", nugget_value, "\n")
+cat("Sill:", sill_value, "\n")
+```
+
+# Franklin Basin Semivariance
+
+```{r}
+variogram_uppercase_fx <- function(x){
+host <- x %>% filter(Species == "ABLA" | Species == "ABCO")
+live_host <- host %>% filter(`Dead / Alive` == 1)
+
+## we need to run this code again to get binary infestation again
+live_host$`Inf Location`[live_host$`Inf Location`== "-"] <- 0
+live_host$`Inf Location`[is.na(live_host$`Inf Location`)] <- 0
+unique(live_host$`Inf Location`)
+live_host$`Inf Location`[live_host$`Inf Location` == "BO" | live_host$`Inf Location` == "BR, BO" | live_host$`Inf Location` == "BR"] <- 1
+live_host$`Inf Location` <- as.numeric(live_host$`Inf Location`)
+
+Lats <- live_host$Latitude # create latitude vector
+Longs <- live_host$Longitude # create longitude vector
+
+coordinates <- live_host[, c("Latitude", "Longitude")] # create coordinate dataframe
+infestation <- live_host$`Inf Location`
+
+# Create a SpatialPointsDataFrame
+tree_sp <- SpatialPointsDataFrame(coords = coordinates, data = data.frame(infestation), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_model <- variogram(infestation ~ 1, data = tree_sp)
+
+# Plot the variogram
+plot(variogram_model)
+
+variogram_model_fit <- fit.variogram(variogram_model, model = vgm(1, "Exp"))
+
+plot<-plot(variogram_model, model = variogram_model_fit)
+summary(variogram_model)
+summary(variogram_model_fit)
+
+# Extract the range, sill, and nugget
+range_value <- variogram_model_fit$range
+sill_value <- variogram_model_fit$sill
+nugget_value <- variogram_model_fit$nugget
+
+# Print the values
+cat("Range:", range_value, "\n")
+
+# Calculate nugget and sill from the partial sill
+nugget_value <- variogram_model_fit$psill - variogram_model_fit$range
+sill_value <- variogram_model_fit$psill
+
+# Print the values
+cat("Nugget:", nugget_value, "\n")
+cat("Sill:", sill_value, "\n")
+return(plot)
+}
+```
+
+# Monte Cristo Semivariance
+
+```{r}
+variogram_uppercase_fx(mocr_combined)
+```
+
+# Mount Timpanogos Semivariance
+
+```{r}
+variogram_uppercase_fx(mttp_combined)
+```
+
+# Smith and Morehouse Semivariance ( This on is coming out weird - wrong model? )
+
+```{r}
+host <- smmh_combined %>% filter(Species == "ABLA" | Species == "ABCO")
+live_host <- host %>% filter(`Dead / Alive` == 1)
+
+## we need to run this code again to get binary infestation again
+live_host$`Inf Location`[live_host$`Inf Location`== "-"] <- 0
+live_host$`Inf Location`[is.na(live_host$`Inf Location`)] <- 0
+unique(live_host$`Inf Location`)
+live_host$`Inf Location`[live_host$`Inf Location` == "BO" | live_host$`Inf Location` == "BR, BO" | live_host$`Inf Location` == "BR"] <- 1
+live_host$`Inf Location` <- as.numeric(live_host$`Inf Location`)
+
+Lats <- live_host$Latitude # create latitude vector
+Longs <- live_host$Longitude # create longitude vector
+
+coordinates <- live_host[, c("Latitude", "Longitude")] # create coordinate dataframe
+infestation <- live_host$`Inf Location`
+
+# Create a SpatialPointsDataFrame
+tree_sp <- SpatialPointsDataFrame(coords = coordinates, data = data.frame(infestation), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_model <- variogram(infestation ~ 1, data = tree_sp)
+
+# Plot the variogram
+plot(variogram_model)
+
+variogram_model_fit <- fit.variogram(variogram_model, model = vgm(psill = 0.1486, "Exp", range = 0.003897))
+
+plot(variogram_model, model = variogram_model_fit)
+summary(variogram_model)
+summary(variogram_model_fit)
+
+# Extract the range, sill, and nugget
+range_value <- variogram_model_fit$range
+sill_value <- variogram_model_fit$sill
+nugget_value <- variogram_model_fit$nugget
+
+# Print the values
+cat("Range:", range_value, "\n")
+
+# Calculate nugget and sill from the partial sill
+nugget_value <- variogram_model_fit$psill - variogram_model_fit$range
+sill_value <- variogram_model_fit$psill
+
+# Print the values
+cat("Nugget:", nugget_value, "\n")
+cat("Sill:", sill_value, "\n")
+```
+
+# 
+

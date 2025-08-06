@@ -1,0 +1,432 @@
+---
+title: "Random Stuff"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Random Stuff
+1/29/23
+Michael Wayman
+
+Just doing some random stuff here: Beetles, plots, just a smorgasbord of different things that need doing. Let's a go (Mario voice)!
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+## Clear out environment
+```{r}
+
+rm(list = ls())
+
+```
+## Packages (pretty much everything I'm using at this point)
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(rfishnet2)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(plyr)
+library(reshape2)
+library(geosphere)
+library(data.table)
+library(writexl)
+```
+
+## Data
+
+```{r}
+combined <- read_xlsx("combined_cleaned2.xlsx") # This is all of our data cleaned and not combined into single observations per tree yet
+
+data <- read_xlsx("data_with_nearest_info.xlsx") # this contains all live trees combined into a single obs per tree with nearest tree info
+
+site_stats <- read_xlsx("site_stats.xlsx") # Plot-level stats
+```
+
+# Beetles
+
+We're trying to see:
+
+1) If we have any trees that have beetle presence as well as BWA
+
+2) How many dead trees look to be killed in part by beetles (ie. how many dead with beetle sign)
+
+```{r}
+# Recode Beetle for visit 1
+unique(data$Beetle_v1)
+data$Beetle_v1[data$Beetle_v1 == "BIB" | data$Beetle_v1 == "TB" | data$Beetle_v1 == "AB"] <- 1
+data$Beetle_v1[data$Beetle_v1 == "-"] <- 0
+data$Beetle_v1[is.na(data$Beetle_v1)] <- 0
+data$Beetle_v1 <- as.numeric(data$Beetle_v1)
+# recode visit 2
+unique(data$Beetle_v2)
+data$Beetle_v2[data$Beetle_v2 == "BIB" | data$Beetle_v2 == "TB" | data$Beetle_v2 == "AB"] <- 1
+data$Beetle_v2[data$Beetle_v2 == "-"] <- 0
+data$Beetle_v2[is.na(data$Beetle_v2)] <- 0
+data$Beetle_v2 <- as.numeric(data$Beetle_v2)
+
+beetle_bwa_1 <- data %>% dplyr::filter(infestation_visit_1 == 1 & Beetle_v1 == 1) # 5 observations
+beetle_bwa_2 <- data %>% dplyr::filter(infestation_visit_2 == 1 & Beetle_v2 == 1) # one tree added that had beetles first and then got infested
+
+# dead trees will be in combined and not have visit1
+combined$Beetle[combined$Beetle == "BIB" | combined$Beetle == "TB" | combined$Beetle == "AB" | combined$Beetle == "FE" | combined$Beetle == "WWB" | combined$Beetle == "TB, FE" | combined$Beetle == "TB, WB"] <- 1
+combined$Beetle[combined$Beetle == "-"] <- 0
+combined$Beetle[is.na(combined$Beetle)] <- 0
+combined$Beetle <- as.numeric(combined$Beetle)
+
+beetle_dead <- combined %>% dplyr::filter(Beetle == 1 & `Dead / Alive` == 0) 
+beetle_dead$tag_ID <- paste(beetle_dead$`Site ID`, beetle_dead$`Tag #`, sep = "")
+beetle_dead <- beetle_dead[!duplicated(beetle_dead$tag_ID), ] # remove duplicates -        219 of dead show signs of beetle
+
+total_dead <- combined %>% dplyr::filter(`Dead / Alive` == 0)
+total_dead$tag_ID <- paste(total_dead$`Site ID`, total_dead$`Tag #`, sep = "")
+total_dead <- total_dead[!duplicated(total_dead$tag_ID), ] # 368 total dead trees
+
+hist(beetle_dead$DBH)
+
+# look at how many WBB dead
+
+```
+
+# Infestation sum mean vs plot stats
+
+We can use infestation sum average as a way to look at the intensity of infestation on a site rather than the overall prevalence
+
+```{r}
+
+inf_mean_1 <- data %>% dplyr::group_by(site) %>%
+                     dplyr::summarise(inf_mean_1 = mean(infestation_sum_Visit1_focal, na.rm = TRUE))
+names(inf_mean_1)[1] <- "Site ID"
+
+inf_mean_2 <- data %>% dplyr::group_by(site) %>%
+                     dplyr::summarise(inf_mean_2 = mean(infestation_sum_Visit2_focal, na.rm = TRUE))
+names(inf_mean_2)[1] <- "Site ID"
+
+site_stats <- dplyr::inner_join(site_stats, inf_mean_1, by = "Site ID")
+site_stats <- dplyr::inner_join(site_stats, inf_mean_2, by = "Site ID")
+
+```
+
+# Infestation Sum vs Density (SDI)
+
+This tells us in general if intensity is correlated with density
+
+```{r}
+
+inf_mean_sdi_plot <- ggplot(site_stats, aes(x = SDI, y = inf_mean_1)) +
+  geom_point()+
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Rieneke SDI", y = "Infestation mean", title = "Site SDI by infestation mean")
+
+inf_mean_sdi_plot
+
+```
+
+# Infestation mean vs QMD
+
+This is telling us if the general sizes of tree on the site affect intensity. Are stands with larger or smaller trees being infested more or less intensely? 
+
+```{r}
+
+inf_mean_qmd_plot <- ggplot(site_stats, aes(x = QMD, y = inf_mean_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "QMD", y = "Infestation mean", title = "Site QMD vs infestation mean")
+
+inf_mean_qmd_plot
+
+```
+
+# Infestation mean vs prevalence on site
+
+This could be really interesting as far as looking at establishment on a site. If we have a correlation between prevalence and intensity, then we can assume some sort of density-dependence on the site level. Maybe there needs to be some sort of baseline prevalence across a site for intensity to increase to a high level.
+
+```{r}
+# plot of infestation mean by percentage of trees infested on a site
+inf_mean_percent_by_tree_plot <- ggplot(site_stats, aes(x = Percent_by_tree_1, y = inf_mean_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean")
+
+inf_mean_percent_by_tree_plot
+
+# linear model to test fit
+lm_inf_mean_percent_tree <- lm(Percent_by_tree_1 ~ inf_mean_1, data = site_stats)
+summary(lm_inf_mean_percent_tree)
+
+# Plot with r-squared included
+r2 <- summary(lm_inf_mean_percent_tree)$r.squared
+
+inf_mean_percent_by_tree_plot + annotate(
+  "text",
+  x = Inf, y = Inf,
+  label = paste("R-squared =", round(r2, 2)),
+  hjust = 1, vjust = 1,
+  color = "black", size = 3
+)
+
+```
+
+# Size class separation and analysis
+
+What I want to do is separate trees by size class and then look at infestation percentages of these size classes. The question would be: are certain size classes being infested more than others? We would expect that size does not matter and that all size classes are being targeted no matter what. Let's see if this is the case.
+
+I'll first separate trees into 2 inch size classes and then maybe 4 inch size classes and see any differences.
+
+- Try trees per acre instead. For infested and non-infested and look at disprecency
+- and total trees per acre of all species
+
+```{r}
+
+# do this with cuts to make easier - 4 cm classes (just make these breaks even bins for the site - 5 or 10cm classes)
+
+breaks <- c(0,4,8,12,16,20,24,28,32,36,40,Inf)
+
+data$size_class <- cut(data$dbh, breaks, labels = FALSE, include.lowest = TRUE)
+data$size_class[is.na(data$size_class)] <- 0
+data$size_class <- as.factor(data$size_class)
+
+# add BA for trees in metric to do percent basal area calculations
+data$DBH <- data$dbh * 2.54 # convert DBH to cm
+data <- mutate(data, BA = (0.0000785 * (dbh ^ 2)))
+data$TPHA <- data$BA * 4 # use basal area expansion factor to get TPHA
+
+names(data)[1] <- "site"
+names(data)[8] <- "infested"
+
+class_inf <- data %>%
+  dplyr::group_by(site, size_class) %>%
+  dplyr::summarise(percent_inf = round(mean(infested_v1==1) * 100),
+                   ba_sum = sum(BA), 
+                   tpha_sum = sum(TPHA),
+                   tpha_inf_sum = sum(TPHA[infested_v1 == 1]),
+                   tpha_not_inf_sum = sum(TPHA[infested_v1 == 0]))
+
+ggplot(class_inf, aes(x = size_class, y = percent_inf, fill = site)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Percent infestation for each size class for each site",
+       x = "Size class (4cm cutoff)",
+       y = "Percent of size class infested",
+       fill = "Site") +
+  theme_minimal()
+
+names(site_stats)[1] <- "site"
+site_stats$`Stand BA` <- site_stats$`Stand BA`/4
+
+class_inf <- inner_join(site_stats, class_inf, by = "site")
+class_inf$ba_percent_inf <- (class_inf$ba_sum / class_inf$`Stand BA` * 100)
+
+ggplot(class_inf, aes(x = size_class, y = ba_percent_inf, fill = site)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Percent infestation by basal area for each size class for each site",
+       x = "Size class (4cm cutoff)",
+       y = "Percent of size class infested by basal area percentage",
+       fill = "Site") +
+  theme_minimal()
+
+# separate site data out and then plot tpha of infested vs non-infested next to each other
+frnk_stats <- class_inf %>% dplyr::filter(site == "FRNK")
+cxsp_stats <- class_inf %>% dplyr::filter(site == "CXSP")
+emig_stats <- class_inf %>% dplyr::filter(site == "EMIG")
+mocr_stats <- class_inf %>% dplyr::filter(site == "MOCR")
+mttp_stats <- class_inf %>% dplyr::filter(site == "MTTP")
+smmh_stats <- class_inf %>% dplyr::filter(site == "SMMH")
+soap_stats <- class_inf %>% dplyr::filter(site == "SOAP")
+tmpf_stats <- class_inf %>% dplyr::filter(site == "TMPF")
+
+# plots by site
+# Franklin Basin
+frnk_long <- frnk_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "Treesperhectare")
+
+ggplot(frnk_long, aes(fill=infested_variable, y=Treesperhectare, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Franklin Basin - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Cox Spring
+cxsp_long <- cxsp_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(cxsp_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Cox Spring - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Emigration
+emig_long <- emig_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(emig_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Emigration Canyon - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Monte Cristo
+mocr_long <- mocr_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(mocr_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Monte Cristo - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Mount Timp
+mttp_long <- mttp_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(mttp_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Mount Timpanogos - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Smith and Morehouse
+smmh_long <- smmh_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(smmh_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Smith and Morehouse - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Soapstone
+soap_long <- soap_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(soap_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Soapstone Basin - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+# Temple Fork
+tmpf_long <- tmpf_stats %>%
+  pivot_longer(cols = c(tpha_inf_sum, tpha_not_inf_sum), names_to = "infested_variable", values_to = "trees_per_ha")
+
+ggplot(tmpf_long, aes(fill=infested_variable, y=trees_per_ha, x=size_class)) + 
+    geom_bar(position="dodge", stat="identity") +
+    labs(title = "Temple Fork - Trees per hectare of infested vs non-infested",
+       x = "Size class (4cm cutoff)")
+
+```
+
+So this turns out not to be the best way to represent these data. Since our large size classes only have a few trees, it will look like we have really high percentages of infestation, but this is just a relic of there being so little individuals. I think a better way to do this is to sum the amount of basal area infested - ended doing this up above right after first try.
+
+-- Edit to above -- ended up doing TPHA summed up for the size classes and plotting them out by site
+
+# Add a split tree variable
+
+I think the best we can do for this is to just see which trees have duplicated locations. There may be some error here due to the GPS, but for the most part, we should be able to get almost every split tree. And if there is error, hopefully we'll either catch it this season descriptively or we can say that in the data they are acting like split trees (ie. occupying the same space technically)
+
+```{r}
+
+data$split_tree <- ifelse(duplicated(data[c("Latitude.focal", "Longitude.focal")]) | duplicated(data[c("Latitude.focal", "Longitude.focal")], fromLast = TRUE), 1, 0) # make a binary "split tree" variable
+
+data[which(data$split_tree == 1), ] # which points have duplicates
+
+```
+
+# Infesation sum change per tree
+
+We want to look at how infesation is changing on every tree. To look at this we can do it two ways. We can look at the change in number of woollies in the windows as well as change in the infestation sum for the tree. This will give us a continuous variable we can either plot against other tree characteristics or just by itself to see whether infestation is overall increasing or decreasing within a plot.
+
+```{r}
+
+data$infestation_difference <- data$infestation_sum_Visit2_focal - data$infestation_sum_Visit1_focal
+names(data)[1] <- "site"
+ggplot(data, aes(x = infestation_difference)) +
+  geom_bar() +
+  facet_wrap(~ site)
+
+# let's look at window numbers
+# Visit 1
+unique(data$NLW_v1)
+data$NLW_v1 <- str_remove(data$NLW_v1, "^.{2}")
+unique(data$NMW_v1)
+data$NMW_v1 <- str_remove(data$NMW_v1, "^.{2}")
+data$NHW_v1 <- str_remove(data$NHW_v1, "^.{2}")
+unique(data$NHW_v1)
+data$SLW_v1 <- str_remove(data$SLW_v1, "^.{2}")
+unique(data$SLW_v1)
+data[which(data$SLW_v1 == "- 4"),]
+data$SLW_v1[data$unique_ID == "MTTP_117_1950"] <- "4"
+data$SMW_v1 <- str_remove(data$SMW_v1, "^.{2}")
+unique(data$SMW_v1)
+data$SHW_v1 <- str_remove(data$SHW_v1, "^.{2}")
+unique(data$SHW_v1)
+
+# visit 2 - do it all at once
+data <- data %>%
+  mutate_at(vars(NLW_v2, NMW_v2, NHW_v2, SLW_v2, SMW_v2, SHW_v2), ~ str_remove(., "^.{2}"))
+
+unique(data$NLW_v2)
+unique(data$NMW_v2)
+unique(data$NHW_v2)
+unique(data$SLW_v2)
+unique(data$SMW_v2)
+unique(data$SHW_v2)
+
+# make numeric
+data <- data %>%
+  mutate_at(vars(NLW_v1, NMW_v1, NHW_v1, SLW_v1, SMW_v1, SHW_v1, NLW_v2, NMW_v2, NHW_v2, SLW_v2, SMW_v2, SHW_v2), ~ as.numeric(.))
+str(data)
+
+# make a change variable
+data$NLW_change <- data$NLW_v2 - data$NLW_v1
+data$NMW_change <- data$NMW_v2 - data$NMW_v1
+data$NHW_change <- data$NHW_v2 - data$NHW_v1
+data$SLW_change <- data$SLW_v2 - data$SLW_v1
+data$SMW_change <- data$SMW_v2 - data$SMW_v1
+data$SHW_change <- data$SHW_v2 - data$SHW_v1
+
+data$sum_window_change <- data$NLW_change + data$NMW_change + data$NHW_change + data$SLW_change + data$SMW_change + data$SHW_change 
+
+ggplot(data, aes(x = NLW_change)) +
+  geom_bar() +
+  facet_wrap(~ site)
+
+ggplot(data, aes(x = NMW_change)) +
+  geom_bar() +
+  facet_wrap(~ site)
+
+ggplot(data, aes(x = sum_window_change)) +
+  geom_bar() +
+  facet_wrap(~ site)
+
+
+```

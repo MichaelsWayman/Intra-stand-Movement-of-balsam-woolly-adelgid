@@ -1,0 +1,307 @@
+---
+title: "Cox Spring Local"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Local Densities
+2/8/24
+Michael Wayman
+
+The purpose of this script and the following seven scripts is to break each site down into local densities and look at how the patterns we've seen may or may not appear on the site level. The first pattern we want to look at is this infestation sum and prevalence idea that we've seen across sites. If it holds for individual sites, then we may have some insight into a site-level density-dependence relationship.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# clean out environment
+
+```{r}
+rm(list = ls())
+
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+library(raster) # for moving window analysis
+
+```
+
+## Load data
+
+```{r}
+
+trees <- read_xlsx("data_with_nearest_info.xlsx")
+cxsp <- trees %>% dplyr::filter(trees$`Site ID_Visit1` == "CXSP")
+cxsp_points <- read_xlsx("cxsp_points.xlsx")
+combined <- read_xlsx("combined_cleaned.xlsx")
+
+```
+
+## Convert coordinates to use meters
+
+```{r}
+
+xy = data.frame(cxsp$Longitude.focal, cxsp$Latitude.focal)
+coordinates(xy) <- c("cxsp.Longitude.focal", "cxsp.Latitude.focal")
+proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")
+NE <- spTransform(xy, CRS("+proj=utm +zone=12 ellps=WGS84"))
+NE <- as.data.frame(NE)
+
+cxsp$Longitude.focal <- NE$coords.x1
+cxsp$Latitude.focal <- NE$coords.x2
+
+```
+
+# Get all trees within 10m of focal tree
+
+```{r}
+
+Holder = as.data.frame(matrix(nrow=0,ncol=4)) 
+colnames(Holder) =c("PLOT", "FROM", "TARGET", "DISTANCE")
+
+#Assign rownames as Tree-ID, dataset also needs UTM_X, UTM_Y, and PLOT
+TEMP_DIST = vegdist(cxsp[,c("Longitude.focal","Latitude.focal")], method = "euclid")
+TEMP_DIST.df = as.data.frame(as.matrix(TEMP_DIST))
+rownames(TEMP_DIST.df) = (cxsp$unique_ID)
+colnames(TEMP_DIST.df) = (cxsp$unique_ID)
+TEMP_DIST.df$`Tag #` = rownames(TEMP_DIST.df)
+TEMP_DIST_MELT = reshape2::melt(TEMP_DIST.df, id.vars = c("Tag #"))
+colnames(TEMP_DIST_MELT) = c("FROM", "TARGET", "DISTANCE")
+
+Holder = rbind(Holder, TEMP_DIST_MELT) #This is your exit
+
+
+#Merge with infestation data
+names(Holder)[1] <- "unique_ID"
+
+Holder_new <- merge(Holder, cxsp, by.x = "TARGET", by.y = "unique_ID")
+holder_new.dt <- as.data.table(Holder_new)
+length(unique(holder_new.dt$unique_ID))
+nrow(holder_new.dt)
+names(holder_new.dt)[11] <- "infested_1"
+names(holder_new.dt)[38] <- "infested_2"
+
+#min_dist_holder <- holder_new.dt[`infested` == 1 & (DISTANCE == min(DISTANCE[(DISTANCE != 0)])) ,.(DISTANCE, TARGET),by=.("unique_ID")]
+
+# distance to all infested less than 10m away
+ten_m_dist_holder <- holder_new.dt[infested_1 == 1 ,.(TARGET, DISTANCE.x),by=.(unique_ID)][, .SD[which(DISTANCE.x <= 10 & (DISTANCE.x[which(DISTANCE.x!=0)]))],by=.(unique_ID)]
+
+# eliminate zeros
+ten_m_dist_holder <- ten_m_dist_holder[ten_m_dist_holder[, DISTANCE.x] != 0, ]
+
+
+# distance to all trees less than 10m away
+ten_m_all_dist_holder <- holder_new.dt[,.(TARGET, DISTANCE.x),by=.(unique_ID)][, .SD[which(DISTANCE.x <= 10)],by=.(unique_ID)]
+
+ten_m_all_dist_holder <- ten_m_all_dist_holder[ten_m_all_dist_holder[, DISTANCE.x] != 0, ]
+
+```
+
+# Non-host Point Pattern
+
+We're missing GPS points for many non-host in Cox Spring so we'll do Emigration in the next chink instead
+
+```{r}
+
+ppp.cxsp.nh <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window, marks = cxsp$Species_Visit1)
+
+cxsp_points <- cxsp_points %>% dplyr::select(-c("Elevation", "distance"))
+cxsp_points <- cxsp_points[-10,] # get rid of host trees
+cxsp_points <- cxsp_points[-10,]
+cxsp_points <- cxsp_points[1:255,] # just keep non-host for combination
+names(cxsp_points)[2] <- "Latitude.focal"
+names(cxsp_points)[3] <- "Longitude.focal"
+
+# change coordinates to UTM
+
+xy.nh = data.frame(cxsp_points$Longitude.focal, cxsp_points$Latitude.focal)
+coordinates(xy.nh) <- c("cxsp_points.Longitude.focal", "cxsp_points.Latitude.focal")
+proj4string(xy.nh) <- CRS("+proj=longlat +datum=WGS84")
+NE <- spTransform(xy.nh, CRS("+proj=utm +zone=12 ellps=WGS84"))
+NE <- as.data.frame(NE)
+
+cxsp_points$Longitude.focal <- NE$coords.x1
+cxsp_points$Latitude.focal <- NE$coords.x2
+
+cxsp_points.nh <- cxsp_points
+
+# Append non-host data
+# Get all site data
+cxsp.nh.data <- combined %>% dplyr::filter(combined$`Site ID` == "CXSP")
+# filter for non-host
+cxsp.nh.data <- cxsp.nh.data %>% dplyr::filter(Species == "POTR"| Species == "ACGR" | Species == "JUSP" | Species == "PSMEG")
+cxsp.nh.data <- cxsp.nh.data %>% dplyr::filter(Visit == 1)
+
+#change case of species for combination
+cxsp.nh.data$Species <- cxsp.nh.data$Species %>% str_to_lower()
+cxsp.nh.data$Name <- paste(cxsp.nh.data$Species, cxsp.nh.data$`Tag #`, sep = "")
+
+cxsp.nh.combined <- inner_join(cxsp.nh.data, cxsp_points.nh, by = "Name")
+
+
+
+# Get host frame ready for combo
+names(cxsp)[2] <- "tag"
+names(cxsp)[3] <- "Species"
+
+```
+
+Since we missed a bunch of non-host in Cox Spring, I'm gonna quickly check other sites
+```{r}
+emig_points <- read_xlsx("emig_points.xlsx")
+emig.nh.data <- combined %>% dplyr::filter(combined$`Site ID` == "EMIG")
+unique(emig.nh.data$Species)
+# filter for non-host
+emig.nh.data <- emig.nh.data %>% dplyr::filter(Species == "POTR"| Species == "PICO" | Species == "PSMEG")
+emig.nh.data <- emig.nh.data %>% dplyr::filter(Visit == 1)
+emig_points <- emig_points[1:150,]
+# only missing one which is pretty good - fixed in combined_cleaned data and original site data
+```
+
+# EMIG Point pattern with non-host
+
+```{r}
+
+emig_points <- emig_points %>% dplyr::select(-c("Elevation", "distance"))
+names(emig_points)[2] <- "Latitude.focal"
+names(emig_points)[3] <- "Longitude.focal"
+
+# change coordinates to UTM
+
+#xy.nh = data.frame(emig_points$Longitude.focal, emig_points$Latitude.focal)
+#coordinates(xy.nh) <- c("emig_points.Longitude.focal", "emig_points.Latitude.focal")
+#proj4string(xy.nh) <- CRS("+proj=longlat +datum=WGS84")
+#NE <- spTransform(xy.nh, CRS("+proj=utm +zone=12 ellps=WGS84"))
+#NE <- as.data.frame(NE)
+
+#emig_points$Longitude.focal <- NE$coords.x1
+#emig_points$Latitude.focal <- NE$coords.x2
+
+emig_points.nh <- emig_points
+# Append non-host data
+
+#change case of species for combination
+emig.nh.data$Species <- emig.nh.data$Species %>% str_to_lower()
+emig.nh.data$Name <- paste(emig.nh.data$Species, emig.nh.data$`Tag #`, sep = "")
+
+emig.nh.combined <- inner_join(emig.nh.data, emig_points.nh, by = "Name")
+
+# Error fixes
+emig_points.nh <- emig_points.nh[-which(emig_points.nh$Name == "pico24"),]# Get rid of Pico24, it was deleted, but point was taken
+emig_points.nh <- emig_points.nh[-which(emig_points.nh$Name == "potr37"),]
+emig_points.nh <- emig_points.nh[-which(emig_points.nh$Name == "potr38"),]
+emig_points.nh <- emig_points.nh[-which(emig_points.nh$Name == "potr39"),]
+# These trees were included with others
+
+# so we're missing points for POTR 45 and 57, which are under 2in totaling 7 trees, I think it's okay to leave out
+emig.nh.combined <- inner_join(emig.nh.data, emig_points.nh, by = "Name")
+
+# Now we need to combine this data with host data
+emig.h <- trees %>% dplyr::filter(trees$`Site ID_Visit1` == "EMIG" & trees$Species_Visit1 == "ABLA")
+
+# We need to mess with non-host dataframe to be able to combine
+names(emig.nh.combined) <- paste(names(emig.nh.combined), "_Visit1", sep = "")
+names(emig.nh.combined)[27] <- "tag_ID"
+emig.nh.combined$tag_ID <- str_to_upper(emig.nh.combined$tag_ID)
+names(emig.nh.combined)[28] <- "Latitude.focal"
+names(emig.nh.combined)[29] <- "Longitude.focal"
+
+str(emig.nh.combined)
+str(emig.h)
+emig.nh.combined$`Inf Location_Visit1` <- as.numeric(emig.nh.combined$`Inf Location_Visit1`)
+emig.nh.combined <- emig.nh.combined %>% mutate_at(vars(NL_Visit1, NM_Visit1, NH_Visit1, SL_Visit1, SM_Visit1, SH_Visit1), as.numeric)
+
+# combine
+emig.all <- bind_rows(emig.nh.combined, emig.h, .id = "source")
+
+# change classes for ArcGIS compatibility
+emig.all$`Inf Location_Visit1` <- as.numeric(emig.all$`Inf Location_Visit1`)
+emig.all$infestation_sum_Visit1_focal <- as.numeric(emig.all$infestation_sum_Visit1_focal)
+emig.all$DISTANCE <- as.numeric(emig.all$DISTANCE)
+# replace NA's for ArcGIS
+emig.all$`Inf Location_Visit1` <- emig.all$`Inf Location_Visit1` %>% replace_na(0)
+emig.all$infestation_sum_Visit1_focal <- emig.all$infestation_sum_Visit1_focal %>% replace_na(0)
+emig.all$DBH_Visit1 <- emig.all$DBH_Visit1 %>% replace_na(0)
+
+write_csv(emig.all, "emig_host_nonhost_with_points_WSG.csv")
+
+# convert coordinates to UTM
+xy = data.frame(emig.all$Longitude.focal, emig.all$Latitude.focal)
+coordinates(xy) <- c("emig.all.Longitude.focal", "emig.all.Latitude.focal")
+proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")
+NE <- spTransform(xy, CRS("+proj=utm +zone=12 ellps=WGS84"))
+NE <- as.data.frame(NE)
+
+emig.all$Longitude.focal <- NE$coords.x1
+emig.all$Latitude.focal <- NE$coords.x2
+
+# Make Species a Factor
+emig.all$Species_Visit1 <- as.factor(emig.all$Species_Visit1)
+
+# make ppp object
+
+ppp.window.emig.all <- owin(xrange = c(min(emig.all$Latitude.focal), max(emig.all$Latitude.focal)), yrange = c(min(emig.all$Longitude.focal), max(emig.all$Longitude.focal)))
+
+ppp.emig.nh <- ppp(emig.all$Latitude.focal, emig.all$Longitude.focal, window = ppp.window.emig.all, marks = emig.all$Species_Visit1)
+
+plot(split(ppp.emig.nh))
+
+
+```
+
+# Gridded Data
+
+```{r}
+# Following data table made in ArcGIS Pro
+grid_data <- read_xlsx("emigration_grid_data.xlsx")
+str(grid_data)
+grid_data$TARGET_FID <- as.factor(grid_data$TARGET_FID)
+prev_intensity_table <- grid_data %>% dplyr::group_by(TARGET_FID) %>%
+                    dplyr::summarize(prevalence = sum(Inf_Location_Visit1)/n() * 100,
+                               intensity = mean(infestation_sum_Visit1_focal))
+
+ggplot(prev_intensity_table, aes(x = prevalence, y = intensity)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells")
+
+
+```

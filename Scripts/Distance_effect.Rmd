@@ -1,0 +1,4989 @@
+---
+title: "Neighborhood Effect"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+knitr::opts_knit$set(root.dir = "~/Project Files/Analysis/Cleaning and Compilation/Cleaning")
+```
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# Clean out environment
+
+```{r}
+rm(list = ls())
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(lme4) # to use glmer
+library(data.table)
+library(glmmTMB)
+library(DHARMa)
+library(MuMIn)
+library(spectralGP)
+library(mgcv)
+library(broom)
+library(broom.helpers)
+library(broom.mixed)
+library(dotwhisker)
+```
+
+# Load data
+
+```{r}
+
+data <- read_xlsx("all_merged_all_spp.xlsx")
+#df <- read_xlsx("under20_pairwise_distances_summary_live_crown.xlsx")
+#df <- read_xlsx("under8_pairwise_distances_summary_live_crown_new.xlsx") - this has mistakes for emigration
+
+## Final data used in modelling - you can import and skip the first few chunks that make this
+
+#data <- read_xlsx("modelling_1_16_data.xlsx")
+
+```
+
+
+
+```{r}
+
+# So we need to convert our decimel degrees to UTM for calculation
+all_merged <- data
+
+all_merged$host_non <- ifelse(all_merged$species == "ABLA" | all_merged$species == "ABCO",1,0)
+all_merged$infested_v1[is.na(all_merged$infested_v1)] <- 0
+all_merged$infested_v2[is.na(all_merged$infested_v2)] <- 0
+all_merged$infested_v3[is.na(all_merged$infested_v3)] <- 0
+all_merged$infested_v4[is.na(all_merged$infested_v4)] <- 0
+
+unique(all_merged$infested_v4)
+
+all_merged <- all_merged[!is.na(all_merged$Latitude),] # We lose 1.8% of data here unfortunately. We don't have coords for those trees
+
+# Remove TMPF outlier
+
+all_merged <- filter(all_merged, tagID != "TMPFABLA224")
+
+# Convert to sf
+all_merged_sf <- st_as_sf(all_merged, coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Define the target UTM zone
+target_crs <- 32612  # EPSG code for UTM zone 12
+
+# Transform the coordinates
+all_merged_utm <- st_transform(all_merged_sf, crs = target_crs)
+all_coords <- st_coordinates(all_merged_utm)
+all_coords <- as.data.frame(all_coords)
+
+# Put back into original datframe
+
+
+all_merged_utm$Longitude <- all_coords$X
+all_merged_utm$Latitude <- all_coords$Y
+
+
+all_merged_utm$unique_ID <- paste(all_merged_utm$unique_ID, rownames(all_merged_utm), sep = "_")
+
+all_infested <- all_merged_utm[all_merged_utm$infested_v1 == 1, ] # Infested trees with UTM coordinates
+
+
+#write_clip(all_merged_utm) # copy dataframe without making file
+#all_merged <- all_merged_utm[!duplicated(all_merged_utm$unique_ID), ] #- there shouldn't be duplicates now
+
+
+row.names(all_merged_utm) <- all_merged_utm$unique_ID
+
+all_merged_utm <- as.data.frame(all_merged_utm)
+
+# change crown height NA's to zero
+all_merged_utm$canopy_ht[is.na(all_merged_utm$canopy_ht)] <- 0
+
+# Infestation sum because its not here for some reason
+all_merged_utm$infestation_sum_v1 <- all_merged_utm$NL_v1 + all_merged_utm$NM_v1 + all_merged_utm$NH_v1 + all_merged_utm$SL_v1 + all_merged_utm$SM_v1 + all_merged_utm$SH_v1
+
+all_merged_utm$infestation_sum_v2 <- all_merged_utm$NL_v2 + all_merged_utm$NM_v2 + all_merged_utm$NH_v2 + all_merged_utm$SL_v2 + all_merged_utm$SM_v2 + all_merged_utm$SH_v2
+
+all_merged_utm$infestation_sum_v3 <- all_merged_utm$NL_v3 + all_merged_utm$NM_v3 + all_merged_utm$NH_v3 + all_merged_utm$SL_v3 + all_merged_utm$SM_v3 + all_merged_utm$SH_v3
+
+all_merged_utm$infestation_sum_v4 <- all_merged_utm$NL_v4 + all_merged_utm$NM_v4 + all_merged_utm$NH_v4 + all_merged_utm$SL_v4 + all_merged_utm$SM_v4 + all_merged_utm$SH_v4
+
+# New way to do this
+all_merged_utm$dbh <- all_merged_utm$dbh * 2.54 # convert DBH to cm
+all_merged_utm <- mutate(all_merged_utm, BA = (0.00007854 * (dbh ^ 2)))
+
+# Add a percent live crown measurement
+
+all_merged_utm$perc_live_crown <- ((all_merged_utm$height - all_merged_utm$canopy_ht) / all_merged_utm$height) * 100
+
+```
+
+```{r}
+
+rm(Holder)
+Holder = as.data.frame(matrix(nrow=0,ncol=4)) 
+colnames(Holder) =c("PLOT", "FROM", "TARGET", "DISTANCE")
+
+#Assign rownames as Tree-ID, dataset also needs UTM_X, UTM_Y, and PLOT
+for( i in levels(as.factor(all_merged_utm$site))){
+  subset_frame = subset(all_merged_utm, site == i)
+TEMP_DIST = vegdist(subset_frame[,c("Longitude","Latitude")], method = "euclid")
+TEMP_DIST.df = as.data.frame(as.matrix(TEMP_DIST))
+rownames(TEMP_DIST.df) = (subset_frame$unique_ID)
+colnames(TEMP_DIST.df) = (subset_frame$unique_ID)
+TEMP_DIST.df$`Tag #` = rownames(TEMP_DIST.df)
+TEMP_DIST_MELT = reshape2::melt(TEMP_DIST.df, id.vars = c("Tag #"))
+colnames(TEMP_DIST_MELT) = c("FROM", "TARGET", "DISTANCE")
+#Make a new column with plot ID
+TEMP_DIST_MELT$PLOT = i
+Holder = rbind(Holder, TEMP_DIST_MELT) #This is your exit
+}
+
+#Merge with infestation data
+names(Holder)[1] <- "unique_ID"
+
+Holder_new <- merge(Holder, all_merged_utm, by.x = "TARGET", by.y = "unique_ID")
+holder_new.dt <- as.data.table(Holder_new)
+length(unique(holder_new.dt$unique_ID))
+
+# names(holder_new.dt)[85] <- "infested_1"
+# names(holder_new.dt)[86] <- "infested_2"
+#min_dist_holder <- holder_new.dt[`infested` == 1 & (DISTANCE == min(DISTANCE[(DISTANCE != 0)])) ,.(DISTANCE, TARGET),by=.("unique_ID")]
+
+# Get all trees under xm from focal tree
+
+holder_8 <- holder_new.dt[,.(TARGET, DISTANCE), by=.(unique_ID)][,.SD[which(DISTANCE <= 8 & DISTANCE != 0)], by=.(unique_ID)]
+
+holder_20 <- holder_new.dt[,.(TARGET, DISTANCE), by=.(unique_ID)][,.SD[which(DISTANCE <= 20 & DISTANCE != 0)], by=.(unique_ID)]
+
+
+# add distances to data
+# visit 1 distances
+#data_with_nearest_infested_dis <- all_merged_utm %>% inner_join(min_dist_holder, by = "unique_ID")
+
+
+```
+
+# Function to extract info from target trees
+
+```{r}
+
+
+# Create a function to extract the variable based on the linked tree ID
+extractVariable <- function(TARGET, variable) {
+  linkedTreeRow <- all_merged_utm[all_merged_utm$unique_ID == TARGET, ]
+  if (nrow(linkedTreeRow) > 0) {
+    return(linkedTreeRow[[variable]])
+  } else {
+    return(NA)  # or any other value to indicate missing data
+  }
+}
+
+```
+
+
+# Nearest tree and infested tree calculations
+
+```{r}
+
+#str(all_merged_utm)
+
+# Apply the function to create a new column with the extracted variable - need to change function for each extraction !!
+
+
+
+# distance to nearest infested at time 1
+ min_dist_holder <- holder_new.dt[infested_v1 == 1 ,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+
+ min_dist_holder <- min_dist_holder[!duplicated(min_dist_holder$unique_ID)]
+ 
+ # Distance to nearest infested that's not a clump
+ 
+ min_dist_holder_no_clump <- holder_new.dt[infested_v1 == 1 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_clump <- min_dist_holder_no_clump[!duplicated(min_dist_holder_no_clump$unique_ID)]
+ 
+ # Distance to nearest non-infested and not a clump
+ 
+ min_dist_holder_no_infest <- holder_new.dt[infested_v1 == 0 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_infest <- min_dist_holder_no_infest[!duplicated(min_dist_holder_no_infest$unique_ID)]
+ 
+ min_dist_holder_no_infest <- min_dist_holder_no_infest %>% select(-4)
+ 
+ # Distance to nearest tree
+ 
+ min_dist_holder_tree <- holder_new.dt[,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+
+ min_dist_holder_tree <- min_dist_holder_tree[!duplicated(min_dist_holder_tree$unique_ID)]
+ 
+# Get rid of not needed dbh column
+min_dist_holder_no_clump <- min_dist_holder_no_clump %>% select(1:3)
+
+ # distance to nearest infested at time 2
+ min_dist_holder2 <- holder_new.dt[infested_v2 == 1 ,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+
+  min_dist_holder2 <- min_dist_holder2[!duplicated(min_dist_holder2$unique_ID)]
+  
+# Distance to nearest infested that's not a clump
+  
+  min_dist_holder_no_clump_v2 <- holder_new.dt[infested_v2 == 1 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_clump_v2 <- min_dist_holder_no_clump_v2[!duplicated(min_dist_holder_no_clump_v2$unique_ID)]
+ 
+ min_dist_holder_no_clump_v2 <- min_dist_holder_no_clump_v2 %>% select(-4)
+ 
+ # Distance to nearest non-infested and not a clump - time 2
+ 
+ min_dist_holder_no_infest_v2 <- holder_new.dt[infested_v2 == 0 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_infest_v2 <- min_dist_holder_no_infest_v2[!duplicated(min_dist_holder_no_infest_v2$unique_ID)]
+ 
+ min_dist_holder_no_infest_v2 <- min_dist_holder_no_infest_v2 %>% select(-4)
+ 
+ # distance to nearest infested at time 3
+ min_dist_holder3 <- holder_new.dt[infested_v3 == 1 ,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+
+  min_dist_holder3 <- min_dist_holder3[!duplicated(min_dist_holder3$unique_ID)]
+  
+# Distance to nearest infested that's not a clump
+  
+  min_dist_holder_no_clump_v3 <- holder_new.dt[infested_v3 == 1 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_clump_v3 <- min_dist_holder_no_clump_v3[!duplicated(min_dist_holder_no_clump_v3$unique_ID)]
+ 
+ min_dist_holder_no_clump_v3 <- min_dist_holder_no_clump_v3 %>% select(-4)
+ 
+  # Distance to nearest non-infested and not a clump - time 3
+ 
+ min_dist_holder_no_infest_v3 <- holder_new.dt[infested_v3 == 0 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_infest_v3 <- min_dist_holder_no_infest_v3[!duplicated(min_dist_holder_no_infest_v3$unique_ID)]
+ 
+ min_dist_holder_no_infest_v3 <- min_dist_holder_no_infest_v3 %>% select(-4)
+ 
+ # distance to nearest infested at time 4
+ min_dist_holder4 <- holder_new.dt[infested_v4 == 1 ,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+ 
+  min_dist_holder4 <- min_dist_holder4[!duplicated(min_dist_holder4$unique_ID)]
+  
+  # Distance to nearest infested that's not a clump
+  
+  min_dist_holder_no_clump_v4 <- holder_new.dt[infested_v4 == 1 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_clump_v4 <- min_dist_holder_no_clump_v4[!duplicated(min_dist_holder_no_clump_v4$unique_ID)]
+ 
+ min_dist_holder_no_clump_v4 <- min_dist_holder_no_clump_v4 %>% select(-4)
+ 
+  # Distance to nearest non-infested and not a clump - time 4
+ 
+ min_dist_holder_no_infest_v4 <- holder_new.dt[infested_v4 == 0 ,.(TARGET, DISTANCE, dbh),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0 & dbh > 2.54)]))],by=.(unique_ID)]
+
+ min_dist_holder_no_infest_v4 <- min_dist_holder_no_infest_v4[!duplicated(min_dist_holder_no_infest_v4$unique_ID)]
+ 
+ min_dist_holder_no_infest_v4 <- min_dist_holder_no_infest_v4 %>% select(-4)
+
+
+ names(min_dist_holder2)[2] <- "TARGET2"
+ names(min_dist_holder2)[3] <- "DISTANCE2"
+  names(min_dist_holder3)[2] <- "TARGET3"
+ names(min_dist_holder3)[3] <- "DISTANCE3"
+  names(min_dist_holder4)[2] <- "TARGET4"
+ names(min_dist_holder4)[3] <- "DISTANCE4"
+ names(min_dist_holder_no_clump)[2] <- "TARGET_v1_noclump"
+  names(min_dist_holder_no_clump)[3] <- "DISTANCE_v1_noclump"
+   names(min_dist_holder_no_clump_v2)[2] <- "TARGET_v2_noclump"
+  names(min_dist_holder_no_clump_v2)[3] <- "DISTANCE_v2_noclump"
+   names(min_dist_holder_no_clump_v3)[2] <- "TARGET_v3_noclump"
+  names(min_dist_holder_no_clump_v3)[3] <- "DISTANCE_v3_noclump"
+   names(min_dist_holder_no_clump_v4)[2] <- "TARGET_v4_noclump"
+  names(min_dist_holder_no_clump_v4)[3] <- "DISTANCE_v4_noclump"
+  names(min_dist_holder_no_infest)[2] <- "TARGET_v1_noinfest"
+  names(min_dist_holder_no_infest)[3] <- "DISTANCE_v1_noinfest"
+   names(min_dist_holder_no_infest_v2)[2] <- "TARGET_v2_noinfest"
+  names(min_dist_holder_no_infest_v2)[3] <- "DISTANCE_v2_noinfest"
+   names(min_dist_holder_no_infest_v3)[2] <- "TARGET_v3_noinfest"
+  names(min_dist_holder_no_infest_v3)[3] <- "DISTANCE_v3_noinfest"
+   names(min_dist_holder_no_infest_v4)[2] <- "TARGET_v4_noinfest"
+  names(min_dist_holder_no_infest_v4)[3] <- "DISTANCE_v4_noinfest"
+  names(min_dist_holder_tree)[2] <- "nearest_tree"
+  names(min_dist_holder_tree)[3] <- "dist_nearest_tree"
+
+ # add distances to data
+merge_data <- all_merged_utm
+ # visit 1 distances
+ merge_data <- merge_data %>% inner_join(min_dist_holder, by = "unique_ID")
+ merge_data <- merge_data %>% inner_join(min_dist_holder_no_clump, by = "unique_ID")
+ merge_data <- merge_data %>% inner_join(min_dist_holder_no_infest, by = "unique_ID")
+
+ # visit 2 distances
+ merge_data <- merge_data %>% inner_join(min_dist_holder2, by = "unique_ID")
+ merge_data <- merge_data %>% inner_join(min_dist_holder_no_clump_v2, by = "unique_ID")
+ merge_data <- merge_data %>% inner_join(min_dist_holder_no_infest_v2, by = "unique_ID")
+  
+ # visit 3 distances
+ merge_data <- merge_data %>% left_join(min_dist_holder3, by = "unique_ID")
+ merge_data <- merge_data %>% left_join(min_dist_holder_no_clump_v3, by = "unique_ID")
+ merge_data <- merge_data %>% inner_join(min_dist_holder_no_infest_v3, by = "unique_ID")
+ 
+ # visit 4 distances
+ merge_data <- merge_data %>% left_join(min_dist_holder4, by = "unique_ID")
+ merge_data <- merge_data %>% left_join(min_dist_holder_no_clump_v4, by = "unique_ID")
+ merge_data <- merge_data %>% inner_join(min_dist_holder_no_infest_v4, by = "unique_ID")
+ 
+ # nearest tree distance
+merge_data <- merge_data %>% inner_join(min_dist_holder_tree, by = "unique_ID")
+
+#df <- holder_20
+  # extract_local <- function(df){
+
+# df$infestation_under <- sapply(df$TARGET, extractVariable, variable = "infested_v1")
+# df$infestation_2_under <- sapply(df$TARGET, extractVariable, variable = "infested_v2")
+# df$infestation_3_under <- sapply(df$TARGET, extractVariable, variable = "infested_v3")
+# df$infestation_4_under <- sapply(df$TARGET, extractVariable, variable = "infested_v4")
+# df$infestation.sum.1_under <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v1")
+# df$infestation.sum.2_under <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v2")
+# df$infestation.sum.3_under <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v3")
+# df$infestation.sum.4_under <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v4")
+# df$dbh_under <- sapply(df$TARGET, extractVariable, variable = "dbh")
+# df$brooms_under <- sapply(df$TARGET, extractVariable, variable = "brooms")
+# df$gouting_under <- sapply(df$TARGET, extractVariable, variable = "Gouting_v1")
+# df$species_under <- sapply(df$TARGET, extractVariable, variable = "species")
+# df$BA_under <- sapply(df$TARGET, extractVariable, variable = "BA")
+# df$crown_ht__under <- sapply(df$TARGET, extractVariable, variable = "canopy_ht")
+# df$dead_alive <- sapply(df$TARGET, extractVariable, variable = "Dead / Alive_v1")
+# df$host_non <- sapply(df$TARGET, extractVariable, variable = "host_non")
+# df$percent_live_crown <- sapply(df$TARGET, extractVariable, variable = "perc_live_crown")
+#df$height_under <- pbsapply(df$TARGET, extractVariable, variable = "height")
+#  # }
+  
+# vectorized solution to speed up df computation
+df <- df %>%
+  dplyr::left_join(all_merged_utm %>% dplyr::select(unique_ID, height), 
+                   by = c("TARGET" = "unique_ID")) %>%
+  dplyr::rename(height_under = height)
+
+
+ #writexl::write_xlsx(df, "under8_pairwise_distances_summary_1_15.xlsx")
+ 
+#df <- read_xlsx("under20_pairwise_distances_summary_live_crown.xlsx")
+
+
+#writexl::write_xlsx(df, "under20_pairwise_distances_summary_2_7.xlsx")
+
+#df <- read_xlsx("under8_pairwise_distances_summary_live_crown_new.xlsx")
+
+# create a summary table of local stats for each tree
+
+#df <- read_xlsx("under20_pairwise_distances_summary_1_18.xlsx")
+
+# Fill in NA heights before competition index calculation
+# Fix NA heights - We're missing some heights, so we'll take the average ratio of dbh-height from each site and apply that to fill in our NA's
+hts <- merge_data %>% filter(is.na(height)) # Emig,FRNK,MOCR,MTTP,SOAP
+
+emig_ratio <- merge_data %>% filter(site == "EMIG") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+
+frnk_ratio <- merge_data %>% filter(site == "FRNK") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+
+mocr_ratio <- merge_data %>% filter(site == "MOCR") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+
+mttp_ratio <- merge_data %>% filter(site == "MTTP") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+
+soap_ratio <- merge_data %>% filter(site == "SOAP") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+
+all_merged_utm$height[all_merged_utm$site=="EMIG" & is.na(all_merged_utm$height)] <-   all_merged_utm$dbh[is.na(all_merged_utm$height) & all_merged_utm$site == "EMIG"] * emig_ratio
+all_merged_utm$height <- as.numeric(all_merged_utm$height)
+all_merged_utm$height[all_merged_utm$site=="FRNK" & is.na(all_merged_utm$height)] <-   all_merged_utm$dbh[is.na(all_merged_utm$height) & all_merged_utm$site == "FRNK"] * frnk_ratio
+all_merged_utm$height <- as.numeric(all_merged_utm$height)
+all_merged_utm$height[all_merged_utm$site=="MOCR" & is.na(all_merged_utm$height)] <-   all_merged_utm$dbh[is.na(all_merged_utm$height) & all_merged_utm$site == "MOCR"] * mocr_ratio
+all_merged_utm$height <- as.numeric(all_merged_utm$height)
+all_merged_utm$height[all_merged_utm$site=="MTTP" & is.na(all_merged_utm$height)] <-   all_merged_utm$dbh[is.na(all_merged_utm$height) & all_merged_utm$site == "MTTP"] * mttp_ratio
+all_merged_utm$height <- as.numeric(all_merged_utm$height)
+all_merged_utm$height[all_merged_utm$site=="SOAP" & is.na(all_merged_utm$height)] <-   all_merged_utm$dbh[is.na(all_merged_utm$height) & all_merged_utm$site == "SOAP"] * soap_ratio
+all_merged_utm$height <- as.numeric(all_merged_utm$height)
+all_merged_utm$logheight <- log(all_merged_utm$height + 1)
+
+local_stats <- function(df){
+  df %>% 
+  dplyr::group_by(unique_ID) %>% 
+  dplyr::summarise(n = n(),
+                   n.infested_v1 = sum(infestation_under, na.rm = TRUE),
+                   n.infested_v2 = sum(infestation_2_under, na.rm = TRUE),
+                   n.infested_v3 = sum(infestation_3_under, na.rm = TRUE),
+                   n.infested_v4 = sum(infestation_4_under, na.rm = TRUE),
+                   perc.infested_v1 = (sum(infestation_under, na.rm = TRUE)/n) * 100,
+                   perc.infested_v2 = (sum(infestation_2_under, na.rm = TRUE)/n) * 100,
+                   perc.infested_v3 = (sum(infestation_3_under, na.rm = TRUE)/n) * 100,
+                   perc.infested_v4 = (sum(infestation_4_under, na.rm = TRUE)/n) * 100,
+                   inf.sum_nh_v1 = sum(infestation.sum.1_under, na.rm = TRUE),
+                   inf.sum_nh_v2 = sum(infestation.sum.2_under, na.rm = TRUE),
+                   inf.sum_nh_v3 = sum(infestation.sum.3_under, na.rm = TRUE),
+                   inf.sum_nh_v4 = sum(infestation.sum.4_under, na.rm = TRUE),
+                   avg.dbh = mean(dbh_under, na.rm = TRUE),
+                   brooms_nh = sum(brooms_under, na.rm = TRUE),
+                   avg.gouting = mean(gouting_under, na.rm = TRUE),
+                   gouting.sum = sum(gouting_under, na.rm = TRUE),
+                   avg_crown_ht = mean(crown_ht__under, na.rm = TRUE),
+                   mean_dist_infested_v1 = ifelse(sum(infestation_under, na.rm = TRUE) == 0, NA, mean(DISTANCE[infestation_under == 1], na.rm = TRUE)),
+                   mean_dist_infested_v2 = ifelse(sum(infestation_2_under, na.rm = TRUE) == 0, NA, mean(DISTANCE[infestation_2_under == 1], na.rm = TRUE)),
+                   mean_dist_infested_v3 = ifelse(sum(infestation_3_under, na.rm = TRUE) == 0, NA, mean(DISTANCE[infestation_3_under == 1], na.rm = TRUE)),
+                   mean_dist_infested_v4 = ifelse(sum(infestation_4_under, na.rm = TRUE) == 0, NA, mean(DISTANCE[infestation_4_under == 1], na.rm = TRUE)),
+    basal_area_non_host = sum(BA_under[host_non == 0], na.rm = TRUE),  # non-host BA
+    basal_area_host = sum(BA_under[host_non == 1], na.rm = TRUE),  # host BA
+    basal_area_nh = basal_area_non_host + basal_area_host, # all tree BA
+    percent_basal_area_non_host = basal_area_non_host / (basal_area_non_host + basal_area_host) * 100,# percent non-host BA
+    mean_percent_live_crown = mean(percent_live_crown, na.rm = TRUE),
+    mean_ABLA_ht = mean(height_under[species_under == "ABLA"], na.rm = TRUE),
+    comp_index = 100 * (1/dplyr::n_distinct(species_under[species_under != "ABLA"])) * sum((mean_ABLA_ht - height_under[species_under != "ABLA"]) / mean_ABLA_ht, na.rm = TRUE)
+    )
+}
+
+
+
+# Alternate way - Do this out to 20 meters, subset that by distance and then run local metrics
+
+local_20 <- local_stats(df)
+#local_19 <- df %>% filter(DISTANCE <= 19) %>% local_stats()
+local_18 <- df %>% filter(DISTANCE <= 18) %>% local_stats()
+#local_17 <- df %>% filter(DISTANCE <= 17) %>% local_stats()
+local_16 <- df %>% filter(DISTANCE <= 16) %>% local_stats()
+#local_15 <- df %>% filter(DISTANCE <= 15) %>% local_stats()
+local_14 <- df %>% filter(DISTANCE <= 14) %>% local_stats()
+#local_13 <- df %>% filter(DISTANCE <= 13) %>% local_stats()
+local_12 <- df %>% filter(DISTANCE <= 12) %>% local_stats()
+#local_11 <- df %>% filter(DISTANCE <= 11) %>% local_stats()
+local_10 <- df %>% filter(DISTANCE <= 10) %>% local_stats()
+#local_9 <- df %>% filter(DISTANCE <= 9) %>% local_stats()
+local_8 <- df %>% filter(DISTANCE <= 8) %>% local_stats()
+#local_7 <- df %>% filter(DISTANCE <= 7) %>% local_stats()
+local_6 <- df %>% filter(DISTANCE <= 6) %>% local_stats()
+#local_5 <- df %>% filter(DISTANCE <= 5) %>% local_stats()
+local_4 <- df %>% filter(DISTANCE <= 4) %>% local_stats()
+#local_3 <- df %>% filter(DISTANCE <= 3) %>% local_stats()
+local_2 <- df %>% filter(DISTANCE <= 2) %>% local_stats()
+local_1 <- df %>% filter(DISTANCE <= 1) %>% local_stats()
+#local_.5 <- df %>% filter(DISTANCE <= 0.5) %>% local_stats()
+
+# Doing this to get mean live crown in local stats and closest live infested that's not a clump
+# local_8 <- df %>% local_stats()
+
+# writexl::write_xlsx(local_19, "local_19.xlsx")
+# writexl::write_xlsx(local_18, "local_18.xlsx")
+# writexl::write_xlsx(local_17, "local_17.xlsx")
+# writexl::write_xlsx(local_16, "local_16.xlsx")
+# writexl::write_xlsx(local_15, "local_15.xlsx")
+# writexl::write_xlsx(local_14, "local_14.xlsx")
+# writexl::write_xlsx(local_13, "local_13.xlsx")
+# writexl::write_xlsx(local_12, "local_12.xlsx")
+# writexl::write_xlsx(local_11, "local_11.xlsx")
+# writexl::write_xlsx(local_9, "local_9.xlsx")
+# writexl::write_xlsx(local_8, "local_8.xlsx")
+# writexl::write_xlsx(local_7, "local_7.xlsx")
+# writexl::write_xlsx(local_6, "local_6.xlsx")
+# writexl::write_xlsx(local_5, "local_5.xlsx")
+# writexl::write_xlsx(local_4, "local_4.xlsx")
+# writexl::write_xlsx(local_3, "local_3.xlsx")
+# writexl::write_xlsx(local_2, "local_2.xlsx")
+# writexl::write_xlsx(local_1, "local_1.xlsx")
+# writexl::write_xlsx(local_.5, "local_.5.xlsx")
+```
+
+# Combine with original data
+
+```{r}
+
+ #data$unique_ID <- paste(data$site, data$unique_ID, sep = "")
+# data <- data %>%
+#   dplyr::mutate(unique_ID = paste(unique_ID, row_number(), sep = "_"))
+# data <- data %>% filter(species == "ABLA" | species == "ABCO")
+
+local_1$unique_ID <- sub("_.*", "", local_1$unique_ID)
+local_2$unique_ID <- sub("_.*", "", local_2$unique_ID)
+local_4$unique_ID <- sub("_.*", "", local_4$unique_ID)
+local_6$unique_ID <- sub("_.*", "", local_6$unique_ID)
+local_8$unique_ID <- sub("_.*", "", local_8$unique_ID)
+local_10$unique_ID <- sub("_.*", "", local_10$unique_ID)
+local_12$unique_ID <- sub("_.*", "", local_12$unique_ID)
+local_14$unique_ID <- sub("_.*", "", local_14$unique_ID)
+local_16$unique_ID <- sub("_.*", "", local_16$unique_ID)
+local_18$unique_ID <- sub("_.*", "", local_18$unique_ID)
+local_20$unique_ID <- sub("_.*", "", local_20$unique_ID)
+
+names(merge_data)[94] <- "unique_ID"
+names(merge_data)[87] <- "tagID"
+merge_data <- merge_data[, -94]
+merge_data$unique_ID <- sub("_.*", "", merge_data$unique_ID)# remove row number for combination
+
+
+ local_data_20 <- merge_data %>% left_join(local_20, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_19 <- data %>% left_join(local_19, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_18 <- merge_data %>% left_join(local_18, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_17 <- data %>% left_join(local_17, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_16 <- merge_data %>% left_join(local_16, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_15 <- data %>% left_join(local_15, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_14 <- merge_data %>% left_join(local_14, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_13 <- data %>% left_join(local_13, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_12 <- merge_data %>% left_join(local_12, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_11 <- data %>% left_join(local_11, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_10 <- merge_data %>% left_join(local_10, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_9 <- data %>% left_join(local_9, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+local_data_8 <- merge_data %>% left_join(local_8,by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+#writexl::write_xlsx(local_data_8, "local_data_8_new.xlsx")
+# local_data_7 <- data %>% left_join(local_7, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_6 <- merge_data %>% left_join(local_6, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_5 <- data %>% left_join(local_5, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_4 <- merge_data %>% left_join(local_4, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_3 <- data %>% left_join(local_3, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_2 <- merge_data %>% left_join(local_2, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_1 <- merge_data %>% left_join(local_1, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+# local_data_.5 <- data %>% left_join(local_.5, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+
+```
+
+# Run models to get coefficients
+
+We need to transform some variables so we'll do that for everything and then run models, pull out coefficients and then plot them
+
+```{r}
+
+#object_names <- c("local_data_.5", paste0("local_data_", 1:20))
+
+object_names <- c(paste0("local_data_", c(1,2,4,6,8,10,12,14,16,18,20)))
+
+data_list <- mget(object_names)
+
+data_list <- lapply(data_list, function(df) {
+  df$dbh[is.na(df$dbh)] <- 2.54/2
+  df$Gouting_v1[is.na(df$Gouting_v1)] <- 0
+df$infested_v1[is.na(df$infested_v1)] <- 0
+df$infested_v2[is.na(df$infested_v2)] <- 0
+df$infested_v3[is.na(df$infested_v3)] <- 0
+df$infested_v4[is.na(df$infested_v4)] <- 0
+df$logdbh <- log(df$dbh)
+df$n.infested_v1[is.na(df$n.infested_v1)] <- 0
+df$n.infested_v2[is.na(df$n.infested_v2)] <- 0
+df$n.infested_v3[is.na(df$n.infested_v3)] <- 0
+df$n.infested_v4[is.na(df$n.infested_v4)] <- 0
+df$log_number_infested_1 <- log(df$n.infested_v1)
+df$log_number_infested_2 <- log(df$n.infested_v2)
+df$log_number_infested_3 <- log(df$n.infested_v3)
+df$log_number_infested_4 <- log(df$n.infested_v4)
+names(df)[104] <- "TARGET_v1"
+names(df)[105] <- "DISTANCE_v1"
+names(df)[106] <- "TARGET_noclump_v1"
+names(df)[107] <- "DISTANCE_noclump_v1"
+names(df)[108] <- "TARGET_noinfest_v1"
+names(df)[109] <- "DISTANCE_noinfest_v1"
+names(df)[110] <- "TARGET_v2"
+names(df)[111] <- "DISTANCE_v2"
+names(df)[112] <- "TARGET_noclump_v2"
+names(df)[113] <- "DISTANCE_noclump_v2"
+names(df)[114] <- "TARGET_noinfest_v2"
+names(df)[115] <- "DISTANCE_noinfest_v2"
+names(df)[116] <- "TARGET_v3"
+names(df)[117] <- "DISTANCE_v3"
+names(df)[118] <- "TARGET_noclump_v3"
+names(df)[119] <- "DISTANCE_noclump_v3"
+names(df)[120] <- "TARGET_noinfest_v3"
+names(df)[121] <- "DISTANCE_noinfest_v3"
+names(df)[122] <- "TARGET_v4"
+names(df)[123] <- "DISTANCE_v4"
+names(df)[124] <- "TARGET_noclump_v4"
+names(df)[125] <- "DISTANCE_noclump_v4"
+names(df)[126] <- "TARGET_noinfest_v4"
+names(df)[127] <- "DISTANCE_noinfest_v4"
+df$logDISTANCE_v1 <- log(df$DISTANCE_v1)
+df$logDISTANCE_v2 <- log(df$DISTANCE_v2)
+df$logDISTANCE_v3 <- log(df$DISTANCE_v3)
+df$logDISTANCE_v4 <- log(df$DISTANCE_v4)
+df$avg.gouting[is.nan(df$avg.gouting)] <- 0
+df$Gouting_v1 <- as.factor(df$Gouting_v1)
+df$Gouting_v1[is.na(df$Gouting_v1)] <- 0
+unique(df$Gouting_v1)
+df$Gouting_v2 <- as.factor(df$Gouting_v2)
+df$Gouting_v2[is.na(df$Gouting_v2)] <- 0
+unique(df$Gouting_v2)
+df$Gouting_v3 <- as.factor(df$Gouting_v3)
+df$Gouting_v3[is.na(df$Gouting_v3)] <- 0
+unique(df$Gouting_v3)
+df$Gouting_v4 <- as.factor(df$Gouting_v4)
+df$Gouting_v4[is.na(df$Gouting_v4)] <- 0
+df$gouting_recode_v1 <- ifelse(df$Gouting_v1 == 0, 0, 1)
+df$gouting_recode_v2 <- ifelse(df$Gouting_v2 == 0, 0, 1)
+df$gouting_recode_v3 <- ifelse(df$Gouting_v3 == 0, 0, 1)
+df$gouting_recode_v4 <- ifelse(df$Gouting_v4 == 0, 0, 1)
+
+# Standardize variables
+df$infest_sum_std_v1 <- (df$inf.sum_nh_v1 - mean(df$inf.sum_nh_v1, na.rm = TRUE))/sd(df$inf.sum_nh_v1, na.rm = TRUE)
+df$infest_sum_std_v2 <- (df$inf.sum_nh_v2 - mean(df$inf.sum_nh_v2, na.rm = TRUE))/sd(df$inf.sum_nh_v2, na.rm = TRUE)
+df$infest_sum_std_v3 <- (df$inf.sum_nh_v3 - mean(df$inf.sum_nh_v3, na.rm = TRUE))/sd(df$inf.sum_nh_v3, na.rm = TRUE)
+df$infest_sum_std_v4 <- (df$inf.sum_nh_v4 - mean(df$inf.sum_nh_v4, na.rm = TRUE))/sd(df$inf.sum_nh_v4, na.rm = TRUE)
+
+df$basal_area_host_std <- (df$basal_area_host - mean(df$basal_area_host, na.rm = TRUE))/sd(df$basal_area_host, na.rm = TRUE)
+df$basal_area_nh_std <- (df$basal_area_nh - mean(df$basal_area_nh, na.rm = TRUE))/sd(df$basal_area_nh, na.rm = TRUE)
+
+df$brooms_recode <- ifelse(df$brooms > 0, 0, 1)
+
+df$mean_percent_live_crown_std <- (df$mean_percent_live_crown - mean(df$mean_percent_live_crown))/sd(df$mean_percent_live_crown)
+
+df$new_infested_v2 <- ifelse(df$infested_v1 == 0 & df$infested_v2 == 1, 1, 0)
+df$new_infested_v3 <- ifelse(df$infested_v1 == 0 & df$infested_v2 == 0 & df$infested_v3 == 1, 1, 0)
+df$new_infested_v4 <- ifelse(df$infested_v1 == 0 & df$infested_v2 == 0 & df$infested_v3 == 0 & df$infested_v4 == 1, 1, 0)
+
+df$Beetle_v1[is.na(df$Beetle_v1)] <- 0
+df$Beetle_v1 <- ifelse(grepl("[a-zA-Z]", df$Beetle_v1), 1, 0)
+df$Beetle_v2[is.na(df$Beetle_v2)] <- 0
+df$Beetle_v2 <- ifelse(grepl("[a-zA-Z]", df$Beetle_v2), 1, 0)
+df$Beetle_v3[is.na(df$Beetle_v3)] <- 0
+df$Beetle_v3 <- ifelse(grepl("[a-zA-Z]", df$Beetle_v3), 1, 0)
+df$Beetle_v4[is.na(df$Beetle_v4)] <- 0
+df$Beetle_v4 <- ifelse(grepl("[a-zA-Z]", df$Beetle_v4), 1, 0)
+
+df$beetle_recode <- ifelse(rowSums(df[, c("Beetle_v1", "Beetle_v2", "Beetle_v3", "Beetle_v4")] != 0) > 0, 1, 0)
+
+df$mean_dist_infested_v1[is.na(df$mean_dist_infested_v1)] <- 0
+df$mean_dist_infested_recode_v1 <- ifelse(df$mean_dist_infested_v1 == 0, 11, df$mean_dist_infested_v1)
+
+df$mean_dist_infested_v2[is.na(df$mean_dist_infested_v2)] <- 0
+df$mean_dist_infested_recode_v2 <- ifelse(df$mean_dist_infested_v2 == 0, 11, df$mean_dist_infested_v2)
+
+df$mean_dist_infested_v3[is.na(df$mean_dist_infested_v3)] <- 0
+df$mean_dist_infested_recode_v3 <- ifelse(df$mean_dist_infested_v3 == 0, 11, df$mean_dist_infested_v3)
+
+df$mean_dist_infested_v4[is.na(df$mean_dist_infested_v4)] <- 0
+df$mean_dist_infested_recode_v4 <- ifelse(df$mean_dist_infested_v4 == 0, 11, df$mean_dist_infested_v4)
+
+df %>% mutate(new_infestation = ifelse(infested_v1 == 0 & (infested_v2 == 1 | infested_v3 == 1 | infested_v4 == 1), 1, 0))
+
+df$infest_sum_std_new_v1 <- df$infest_sum_std_v1 + 2 # Get rid of negatives and zeros
+df$infest_sum_std_new_v2 <- df$infest_sum_std_v2 + 2
+df$infest_sum_std_new_v3 <- df$infest_sum_std_v3 + 2
+df$infest_sum_std_new_v4 <- df$infest_sum_std_v4 + 2
+# df$infestation.sum_under10_new <- df$infestation.sum_under10 + 1 # try with non-standardized variable
+  return(df)
+})
+
+list2env(data_list, .GlobalEnv)
+
+
+# cor(data[, c("logdbh", "DISTANCE", "height", "Gouting_v1", "crown_height", "brooms_recode", "infestation.sum_under10", "distance_to_nearest_recode", "DISTANCE_nearest_tree", "basal_area_host_std", "percent.infested_under10", "number.infested_under10", "average_crown_ht_under_10", "average.dbh_under10", "qmd_under10")], use = "complete.obs")
+
+```
+
+Model to run
+
+```{r}
+data_list <- mget(object_names)
+
+glmm_results <- lapply(data_list, function(df) {
+  glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE + logdbh + Gouting_v1 + infest_sum_std_new + (1|unique_ID) + (1|site), data = df, family = binomial(link = "logit"))
+})
+
+coefficients_list <- lapply(glmm_results, coef)
+
+
+dbh_coefficients <- sapply(glmm_results, function(model) {
+    return(fixef(model)$cond["logdbh"])  # Extract the fixed-effect coefficient for "dbh"
+})
+
+distance_coefficients <- sapply(glmm_results, function(model) {
+    return(fixef(model)$cond["logDISTANCE"])  # Extract the fixed-effect coefficient for "dbh"
+})
+
+gouting_coefficients <- sapply(glmm_results, function(model) {
+    return(fixef(model)$cond["Gouting_v1"])  # Extract the fixed-effect coefficient for "dbh"
+})
+
+infest_sum_coefficients <- sapply(glmm_results, function(model) {
+    return(fixef(model)$cond["infest_sum_std_new"])  # Extract the fixed-effect coefficient for "dbh"
+})
+
+# Combine into a data frame
+dbh_coeff_data <- data.frame(
+  Distance = c(0.5,1:20),
+  DBH_Coefficient = dbh_coefficients)
+
+distance_coeff_data <- data.frame(
+  Distance = c(0.5,1:20),
+  Distance_Coefficient = distance_coefficients)
+
+gouting_coeff_data <- data.frame(
+  Distance = c(0.5,1:20),
+  Gouting_Coefficient = gouting_coefficients)
+
+infest_sum_coeff_data <- data.frame(
+  Distance = c(0.5,1:20),
+  Infestation_Sum_Coefficient = infest_sum_coefficients)
+
+
+dbh_coefficeient_plot <- ggplot(dbh_coeff_data, aes(x = Distance, y = DBH_Coefficient)) +
+  geom_line(color = "blue", size = 1) +  # Line connecting points
+  geom_point(color = "red", size = 2) +  # Add points for clarity
+  labs(
+    title = "Coefficient of DBH vs. Distance",
+    x = "Distance",
+    y = "DBH Coefficient"
+  ) +
+  theme_minimal()
+
+distance_coefficient_plot <- ggplot(distance_coeff_data, aes(x = Distance, y = Distance_Coefficient)) +
+  geom_line(color = "blue", size = 1) +  # Line connecting points
+  geom_point(color = "red", size = 2) +  # Add points for clarity
+  labs(
+    title = "Coefficient of distance to nearest infested vs. Distance",
+    x = "Distance",
+    y = "Distance to nearest infested Coefficient"
+  ) +
+  theme_minimal()
+
+gouting_coefficient_plot <- ggplot(gouting_coeff_data, aes(x = Distance, y = Gouting_Coefficient)) +
+  geom_line(color = "blue", size = 1) +  # Line connecting points
+  geom_point(color = "red", size = 2) +  # Add points for clarity
+  labs(
+    title = "Coefficient of Gouting vs. Distance",
+    x = "Distance",
+    y = "Gouting Coefficient"
+  ) +
+  theme_minimal()
+
+infest_sum_coefficient_plot <- ggplot(infest_sum_coeff_data, aes(x = Distance, y = Infestation_Sum_Coefficient)) +
+  geom_line(color = "blue", size = 1) +  # Line connecting points
+  geom_point(color = "red", size = 2) +  # Add points for clarity
+  labs(
+    title = "Coefficient of Infestation Sum vs. Distance",
+    x = "Distance",
+    y = "Infestation Sum Coefficient"
+  ) +
+  theme_minimal()
+
+print(dbh_coefficeient_plot)
+print(gouting_coefficient_plot)
+print(infest_sum_coefficient_plot)
+print(distance_coefficient_plot)
+```
+
+# Question 1: Who's infested??
+
+We have this answer in our GLM - tree-level markdown. We copy that model into here with an 8m neighborhood and then do:
+
+Question 2: Are the risk factors the same for different sized trees?
+
+- Looks like we should use a neighborhood of 8m to pick up the largest effects of our coefficients
+
+```{r}
+
+## data manipulation chunk
+
+
+
+# Standardize infestation sum and take care of NA's
+# local_data_8$dbh[is.na(local_data_8$dbh)] <- 2.54/2
+# local_data_8$height <- local_data_8$height * 0.3048
+# local_data_8$Gouting_v1[is.na(local_data_8$Gouting_v1)] <- 0
+# local_data_8$infest_sum_std_v1 <- (local_data_8$inf.sum_nh_v1 - mean(local_data_8$inf.sum_nh_v1))/sd(local_data_8$inf.sum_nh_v1)
+# local_data_8$infest_sum_std_v2 <- (local_data_8$inf.sum_nh_v2 - mean(local_data_8$inf.sum_nh_v2))/sd(local_data_8$inf.sum_nh_v2)
+# local_data_8$infest_sum_std_v3 <- (local_data_8$inf.sum_nh_v3 - mean(local_data_8$inf.sum_nh_v3))/sd(local_data_8$inf.sum_nh_v3)
+# local_data_8$infest_sum_std_v4 <- (local_data_8$inf.sum_nh_v4 - mean(local_data_8$inf.sum_nh_v4))/sd(local_data_8$inf.sum_nh_v4)
+# local_data_8$basal_area_host_std <- (local_data_8$basal_area_host - mean(local_data_8$basal_area_host))/sd(local_data_8$basal_area_host)
+# local_data_8$mean_percent_live_crown_std <- (local_data_8$mean_percent_live_crown - mean(local_data_8$mean_percent_live_crown))/sd(local_data_8$mean_percent_live_crown)
+
+
+# Fix beetles before modelling
+# data$Beetle_v1[is.na(data$Beetle_v1)] <- 0
+# data$Beetle_v1 <- ifelse(grepl("[a-zA-Z]", data$Beetle_v1), 1, 0)
+# data$Beetle_v2[is.na(data$Beetle_v2)] <- 0
+# data$Beetle_v2 <- ifelse(grepl("[a-zA-Z]", data$Beetle_v2), 1, 0)
+# data$Beetle_v3[is.na(data$Beetle_v3)] <- 0
+# data$Beetle_v3 <- ifelse(grepl("[a-zA-Z]", data$Beetle_v3), 1, 0)
+# data$Beetle_v4[is.na(data$Beetle_v4)] <- 0
+# data$Beetle_v4 <- ifelse(grepl("[a-zA-Z]", data$Beetle_v4), 1, 0)
+# 
+# data$beetle_recode <- ifelse(rowSums(data[, c("Beetle_v1", "Beetle_v2", "Beetle_v3", "Beetle_v4")] != 0) > 0, 1, 0)
+
+# Make new infestation variable
+
+# data <- data %>%
+#   mutate(new_infestation = ifelse(infested_v1 == 0 & (infested_v2 == 1 | infested_v3 == 1 | infested_v4 == 1), 1, 0))
+
+
+#data$brooms_recode <- ifelse(data$brooms > 0, 1, 0)
+
+# filter out dead
+
+
+
+# log/tweak things
+#data$height[data$height == 0] <- 0.1
+
+# data$logdbh <- log(data$dbh)
+# data$logDISTANCE_v1 <- log(data$DISTANCE_v1)
+# data$logDISTANCE_v2 <- log(data$DISTANCE_v2)
+# data$logDISTANCE_v3 <- log(data$DISTANCE_v3)
+# data$logDISTANCE_v4 <- log(data$DISTANCE_v4)
+# data$Gouting_v1 <- as.factor(data$Gouting_v1)
+# data$Gouting_v1[is.na(data$Gouting_v1)] <- 0
+# unique(data$Gouting_v1)
+# data$Gouting_v2 <- as.factor(data$Gouting_v2)
+# data$Gouting_v2[is.na(data$Gouting_v2)] <- 0
+# unique(data$Gouting_v2)
+# data$Gouting_v3 <- as.factor(data$Gouting_v3)
+# data$Gouting_v3[is.na(data$Gouting_v3)] <- 0
+# unique(data$Gouting_v3)
+# data$Gouting_v4 <- as.factor(data$Gouting_v4)
+# data$Gouting_v4[is.na(data$Gouting_v4)] <- 0
+# unique(data$Gouting_v4)
+
+# data$mean_dist_infested_v1[is.na(data$mean_dist_infested_v1)] <- 0
+# data$mean_dist_infested_recode_v1 <- ifelse(data$mean_dist_infested_v1 == 0, 11, data$mean_dist_infested_v1)
+# data$mean_dist_infested_v2[is.na(data$mean_dist_infested_v2)] <- 0
+# data$mean_dist_infested_recode_v2 <- ifelse(data$mean_dist_infested_v2 == 0, 11, data$mean_dist_infested_v2)
+# data$mean_dist_infested_v3[is.na(data$mean_dist_infested_v3)] <- 0
+# data$mean_dist_infested_recode_v3 <- ifelse(data$mean_dist_infested_v3 == 0, 11, data$mean_dist_infested_v3)
+# data$mean_dist_infested_v4[is.na(data$mean_dist_infested_v4)] <- 0
+# data$mean_dist_infested_recode_v4 <- ifelse(data$mean_dist_infested_v4 == 0, 11, data$mean_dist_infested_v4)
+# 
+# data$avg.gouting[is.nan(data$avg.gouting)] <- 0 # Was taking mean of 0 to get NaN - replace with zero
+
+# Fix NA heights - We're missing some heights, so we'll take the average ratio of dbh-height from each site and apply that to fill in our NA's
+# hts <- data %>% filter(is.na(height)) # Emig,FRNK,MOCR,MTTP,SOAP
+# 
+# emig_ratio <- data %>% filter(site == "EMIG") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+# data$height[data$site=="EMIG" & is.na(data$height)] <-   data$dbh[is.na(data$height) & data$site == "EMIG"] * emig_ratio
+# 
+# data$height <- as.numeric(data$height)
+# 
+# frnk_ratio <- data %>% filter(site == "FRNK") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+# data$height[data$site=="FRNK" & is.na(data$height)] <-   data$dbh[is.na(data$height) & data$site == "FRNK"] * frnk_ratio
+# 
+# data$height <- as.numeric(data$height)
+# 
+# mocr_ratio <- data %>% filter(site == "MOCR") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+# data$height[data$site=="MOCR" & is.na(data$height)] <-   data$dbh[is.na(data$height) & data$site == "MOCR"] * mocr_ratio
+# 
+# data$height <- as.numeric(data$height)
+# 
+# mttp_ratio <- data %>% filter(site == "MTTP") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+# data$height[data$site=="MTTP" & is.na(data$height)] <-   data$dbh[is.na(data$height) & data$site == "MTTP"] * mttp_ratio
+# 
+# data$height <- as.numeric(data$height)
+# 
+# soap_ratio <- data %>% filter(site == "SOAP") %>% dplyr::summarize(ratios = (height/dbh)) %>% dplyr::summarize(avg_ratio = mean(ratios, na.rm = TRUE))
+# data$height[data$site=="SOAP" & is.na(data$height)] <-   data$dbh[is.na(data$height) & data$site == "SOAP"] * soap_ratio
+# 
+# data$height <- as.numeric(data$height)
+
+# data$logheight <- log(data$height + 1)
+
+data <- local_data_10
+
+data <- data %>% filter(`Dead / Alive_v1`==1)
+
+glmm <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + logdbh + avg.dbh + Gouting_v1 + infest_sum_std_new_v1 + avg.gouting + (1|site), data = data, family = binomial(link = "logit"))
+
+glmm.sims <- simulateResiduals(glmm)
+plot(glmm.sims)
+summary(glmm)
+
+# Make data long
+
+data_long <- data %>%
+  pivot_longer(
+    cols = ends_with("_v1") | ends_with("_v2") | ends_with("_v3") | ends_with("_v4"),  # columns with visit data
+    names_to = c(".value", "visit"),       # use ".value" to keep the original variable name
+    names_pattern = "(.*)_(v[0-9])"        # regex to separate variable name and visit
+  ) %>%
+  mutate(visit = as.numeric(gsub("v", "", visit)))  # Convert "v1", "v2", etc. to 1, 2, etc.
+
+names(data_long)[49] <- "t"
+
+# make logged and lagged variables
+
+data_long <- data_long %>%
+  arrange(unique_ID, t) %>%
+  group_by(unique_ID) %>%
+  mutate(
+    logDISTANCE = log(DISTANCE),
+    logDISTANCE_noclump = log(DISTANCE_noclump),
+    logdbh = log(dbh),
+    lag_logDISTANCE = lag(logDISTANCE),
+    lag_infest_sum_std_new = lag(infest_sum_std_new),
+    lag_infest_sum = lag(infestation_sum),
+    lag_Gouting = lag(Gouting),
+    lag_infested = lag(infested),
+    lag_perc.infested = lag(perc.infested),
+    lag_infestation_sum = lag(infestation_sum)
+  ) %>%
+  ungroup()
+
+data_long$qmd_under <- sqrt(((data_long$basal_area_non_host + data_long$basal_area_host)/(data_long$n*31.83))/0.00007854)
+
+## End of data manipulation
+
+## Load this to skip manipulation steps - this is all live hosts in long format with lagged variables, ready to be subset into last three visits and put into models
+
+#writexl::write_xlsx(data_long, "local_data_8_long_new.xlsx") - 1/13/24 
+
+#data_long <- read_xlsx("local_data_8_long.xlsx")
+
+
+sm <- subset(data_long, t %in% c(2, 3, 4))
+
+sm$site <- as.factor(sm$site)
+sm$unique_ID <- as.factor(sm$unique_ID)
+
+```
+
+# Lagged infestation model
+
+```{r}
+
+time.glmm.withlag <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + lag_logDISTANCE + avg.dbh + (infest_sum_std_new * lag_infest_sum_std_new) + Gouting + logdbh + avg.gouting + (1|unique_ID) + (1|site), data = sm, family = binomial(link = "logit"))
+
+time.glmm.withlag.wosite <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + lag_logDISTANCE + avg.dbh + (infest_sum_std_new * lag_infest_sum_std_new) + Gouting + logdbh + avg.gouting + (1|unique_ID), data = sm, family = binomial(link = "logit"))
+
+time.sims <- simulateResiduals(time.glmm.withlag)
+plot(time.sims)
+
+summary(time.glmm.withlag)
+
+# Looking at interactions
+time.glmm.lag.interact <- glmmTMB(cbind(infested, 1 - infested) ~ (logDISTANCE * logdbh) + lag_logDISTANCE + dist_nearest_tree + (infest_sum_std_new * lag_infest_sum_std_new) + Gouting + logheight + (1|unique_ID) + (1|site), data = sm, family = binomial(link = "logit"))
+
+time.sims.interact <- simulateResiduals(time.glmm.lag.interact)
+plot(time.sims.interact)
+
+summary(time.glmm.lag.interact)
+
+# Checking effect of random effect
+
+summary(time.glmm.withlag.wosite)
+anova(time.glmm.withlag, time.glmm.withlag.wosite)
+
+library(sjPlot)
+re_plot <- sjPlot::plot_model(time.glmm.withlag, type = "re")
+
+library(ggstats)
+
+coef_plot <- ggcoef_model(time.glmm.withlag)
+
+
+
+cor(sm[, c("logheight", "logDISTANCE", "lag_logDISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new", "lag_infest_sum_std_new", "mean_dist_infested", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "n.infested", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+infest.final <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logdbh + logDISTANCE_v1 + avg.dbh + infest_sum_std_new_v1 + Gouting_v1 + logdbh + avg.gouting + (1|unique_ID) + (1|site), data = data, family = binomial(link = "logit"))
+
+final.sims <- simulateResiduals(infest.final)
+plot(final.sims)
+
+summary(infest.final)
+
+# Final lagged model
+time.glmm.withlag <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + avg.dbh + gouting_recode + logdbh + avg.dbh + lag_infested + perc.infested + dist_nearest_tree + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = sm, family = binomial(link = "logit"))
+
+time.sims <- simulateResiduals(time.glmm.withlag)
+plot(time.sims)
+
+summary(time.glmm.withlag)
+
+tidy_main <- broom::tidy(time.glmm.withlag) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_main$model <- "main" 
+
+library(dotwhisker)
+dw_main <- dwplot(tidy_main) +
+  scale_y_discrete(
+    labels = c("logDISTANCE" = "Distance to nearest infested",
+               "lag_infested" = "Lagged infestation status",
+               "perc.infested" = "Percent infested (neighborhood)",
+                "dist_nearest_tree" = "Distance to nearest tree",
+                "gouting_recode" = "Gouting",
+                "avg.dbh" = "Average DBH in neighborhood",
+                "logdbh" = "DBH",
+                "mean_percent_live_crown_std" = "Mean percent live crown (Neighborhood)"),
+    limits = c( "logDISTANCE",
+                "mean_percent_live_crown_std",
+                "avg.dbh",
+                "perc.infested",
+                "dist_nearest_tree",
+                "logdbh",
+                "gouting_recode", 
+                "lag_infested") # Specify the desired order
+  )
+print(dw_main+geom_vline(xintercept=0,lty=2))
+
+
+```
+
+# Full-factorial infestation status model
+
+```{r}
+# MAke indicator variable
+local_data_1$avg.dbh_rad <- 1
+local_data_1$perc.infested_rad <- 1
+local_data_2$avg.dbh_rad <- 2
+local_data_2$perc.infested_rad <- 2
+local_data_4$avg.dbh_rad <- 4
+local_data_4$perc.infested_rad <- 4
+local_data_6$avg.dbh_rad <- 6
+local_data_6$perc.infested_rad <- 6
+local_data_8$avg.dbh_rad <- 8
+local_data_8$perc.infested_rad <- 8
+local_data_10$avg.dbh_rad <- 10
+local_data_10$perc.infested_rad <- 10
+local_data_12$avg.dbh_rad <- 12
+local_data_12$perc.infested_rad <- 12
+local_data_14$avg.dbh_rad <- 14
+local_data_14$perc.infested_rad <- 14
+local_data_16$avg.dbh_rad <- 16
+local_data_16$perc.infested_rad <- 16
+local_data_18$avg.dbh_rad <- 18
+local_data_18$perc.infested_rad <- 18
+local_data_20$avg.dbh_rad <- 20
+local_data_20$perc.infested_rad <- 20
+
+# combine all data
+all_local_data <- local_data_1 %>% bind_rows(local_data_2, local_data_4, local_data_6, local_data_8, local_data_10, local_data_12, local_data_14, local_data_16, local_data_18, local_data_20)
+
+# make long
+# Make long versions 
+all_local_data <- all_local_data %>% filter(`Dead / Alive_v1`==1)
+
+# Make data long
+
+all_local_long <- all_local_data %>%
+  pivot_longer(
+    cols = ends_with("_v1") | ends_with("_v2") | ends_with("_v3") | ends_with("_v4"),  # columns with visit data
+    names_to = c(".value", "visit"),       # use ".value" to keep the original variable name
+    names_pattern = "(.*)_(v[0-9])"        # regex to separate variable name and visit
+  ) %>%
+  mutate(visit = as.numeric(gsub("v", "", visit)))  # Convert "v1", "v2", etc. to 1, 2, etc.
+
+names(all_local_long)[48] <- "t"
+
+# make logged and lagged variables
+
+all_local_long <- all_local_long %>%
+  arrange(unique_ID, t) %>%
+  group_by(unique_ID) %>%
+  mutate(
+    logDISTANCE = log(DISTANCE),
+    logDISTANCE_noclump = log(DISTANCE_noclump),
+    logdbh = log(dbh),
+    lag_logDISTANCE = lag(logDISTANCE),
+    lag_infest_sum_std_new = lag(infest_sum_std_new),
+    lag_infest_sum = lag(infestation_sum),
+    lag_Gouting = lag(Gouting),
+    lag_infested = lag(infested),
+    lag_perc.infested = lag(perc.infested)
+  ) %>%
+  ungroup()
+
+all_local_long$qmd_under <- sqrt(((all_local_long$basal_area_non_host + all_local_long$basal_area_host)/(all_local_long$n*31.83))/0.00007854)
+
+
+all_sm <- subset(all_local_long, t %in% c(2, 3, 4))
+
+all_sm$site <- as.factor(all_sm$site)
+all_sm$unique_ID <- as.factor(all_sm$unique_ID)
+
+
+radii = c(1,2,4,6,8,10,12,14,16,18,20)
+combos = as.data.frame(t(combn(radii,2)))
+
+output_list <- vector("list", nrow(combos))
+
+for (i in 1:nrow(combos)){
+     model_data = all_sm %>% 
+          dplyr::filter(avg.dbh_rad == combos$V1[i] | perc.infested_rad == combos$V2[i])
+     
+     model_data <- model_data %>%
+    dplyr::mutate(
+      avg_dbh_current = ifelse(avg.dbh_rad == combos$V1[i], avg.dbh, NA),
+      perc_infested_current = ifelse(perc.infested_rad == combos$V2[i], perc.infested, NA)
+    )
+     
+     model <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + logdbh + avg_dbh_current + lag_infested + perc_infested_current + dist_nearest_tree, data = model_data, family = binomial(link = "logit"))
+     
+     coeffs = model$coeffs
+     aic = AICc(model)
+     
+     output_list[i] = list(avg.dbh_rad = combos$V1[i], 
+                           perc.infested_rad = combos$V2[i],
+                           coeffs = coeffs,
+                           aic = aic)
+}
+
+
+```
+
+# Visualize predictor variables and effect on infestation probability
+
+- This is just for infestation sum in neighborhood, but we could do these plots for all if needed
+
+```{r}
+# Specify your independent variable of interest and typical values for others
+independent_var <- "infest_sum_std_new"  # Replace with your variable of interest
+other_vars <- c("logDISTANCE", "lag_logDISTANCE", "lag_infest_sum_std_new", "Gouting", "lag_Gouting", "logdbh")  # Your other predictors
+
+# Create a sequence for the variable of interest
+new_data <- data.frame(
+  infest_sum_std_new = seq(min(sm[[independent_var]]), max(sm[[independent_var]]), length.out = 100)
+)
+
+# Add other predictors with their typical values
+for (var in other_vars) {
+  new_data[[var]] <- mean(sm[[var]], na.rm = TRUE)  # Replace with median or other value if preferred
+}
+
+# Predict probabilities
+new_data$predicted_y <- predict(time.glmm.withlag, newdata = new_data, type = "response", re.form = NA)
+
+# Plot
+plot1 <- ggplot() +
+  geom_jitter(data = sm, aes(x = infest_sum_std_new, y = infested), height = 0.05, width = 0, alpha = 0.5, color = "red") +
+  geom_line(data = new_data, aes(x = infest_sum_std_new, y = predicted_y), size = 1) +
+  labs(
+    x = "Infestation sum in the neighborhood (8m)",
+    y = "Probability",
+    title = "Observed Binary Response vs. Predicted Probabilities"
+  ) +
+  theme_minimal()
+
+print(plot1)
+
+```
+
+# Clump Model!
+
+We'll do current and lagged variables for our last three visits
+
+List of variables:
+- Gouting
+- brooms
+- beetle
+- infest sum in neighborhood
+- mean distance to infested
+- number infested in nh
+- percent infested in nh
+- number of trees in nh (competition)
+- lagged variables after we subset just times with lagged variables available
+- mean percent live crown
+
+## Build model
+
+```{r}
+
+clumps <- filter(data, dbh == 1.27)
+
+cor(clumps[, c("logheight", "DISTANCE_v1", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new_v1", "dist_nearest_tree", "basal_area_host_std", "perc.infested_v1", "avg.dbh", "avg.gouting", "mean_percent_live_crown", "n")])
+
+## Building model below
+
+ clump.base <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.base.sims <- simulateResiduals(clump.base)
+plot(clump.base.sims)
+
+summary(clump.base)
+
+# Add brooms
+
+clump.broom <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + brooms_recode + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.broom.sims <- simulateResiduals(clump.broom)
+plot(clump.broom.sims)
+
+summary(clump.broom)
+
+clump.broom.nh <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + brooms_nh + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.broom.sims <- simulateResiduals(clump.broom.nh)
+plot(clump.broom.sims)
+
+summary(clump.broom.nh)
+
+# Add beetle
+
+clump.beetle <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + beetle_recode + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.beetle.sims <- simulateResiduals(clump.beetle)
+plot(clump.beetle.sims)
+
+summary(clump.beetle)
+
+# Add infest sum
+
+clump.sum <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.sum.sims <- simulateResiduals(clump.sum)
+plot(clump.sum.sims)
+
+summary(clump.sum)
+
+# percent infested
+
+clump.pinfest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + perc.infested_v1 + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.pinfest.sims <- simulateResiduals(clump.pinfest)
+plot(clump.pinfest.sims)
+
+summary(clump.pinfest)
+
+# distance to nearest tree
+
+clump.dist.nearinfest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + dist_nearest_tree + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.dist.nearinfest.sims <- simulateResiduals(clump.dist.nearinfest)
+plot(clump.dist.nearinfest.sims)
+
+summary(clump.dist.nearinfest)
+
+# avg. dbh in neighborhood
+
+clump.dbh.infest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + avg.dbh + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.dbh.infest.sims <- simulateResiduals(clump.dbh.infest)
+plot(clump.dbh.infest.sims)
+
+summary(clump.dbh.infest)
+
+# mean percent live crown
+clump.pcrown <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + avg.dbh + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.pcrown.sims <- simulateResiduals(clump.pcrown)
+plot(clump.pcrown.sims)
+
+summary(clump.pcrown)
+
+
+# Building model above
+clump.final <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + avg.dbh + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = clumps, family = binomial(link = "logit"))
+
+clump.final.sims <- simulateResiduals(clump.final)
+plot(clump.final.sims)
+
+summary(clump.final)
+
+# lagged variables - avg. dbh drops
+
+clump.sm <- sm %>% filter(dbh == 1.27)
+
+cor(clump.sm[, c("logDISTANCE", "lag_logDISTANCE", "infest_sum_std_new","lag_infested", "lag_perc.infested",  "lag_infest_sum_std_new", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "avg.dbh", "avg.gouting", "mean_percent_live_crown", "n")])
+
+clump.lag <- glmmTMB(cbind(infested, 1 - infested) ~ lag_infested + perc.infested + gouting_recode + perc.infested + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = clump.sm, family = binomial(link = "logit"))
+
+clump.lag.sims <- simulateResiduals(clump.lag)
+plot(clump.lag.sims)
+
+summary(clump.lag)
+
+testZeroInflation(clump.lag.sims)
+
+# adding lag infestation status drops logDISTANCE and avg dbh
+
+
+# Long dataset
+
+clump_long <- data_long %>% filter(dbh == 1.27)
+
+clump.all <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.all.sims <- simulateResiduals(clump.all)
+plot(clump.all.sims)
+
+summary(clump.all)
+
+```
+
+
+# Large model!!
+
+This includes all trees besides clumps
+
+```{r}
+large <- filter(data, dbh != 1.27 & `Dead / Alive_v1`==1)
+
+cor(large[, c("logdbh","logheight", "DISTANCE_v1", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new_v1", "mean_dist_infested_v1", "dist_nearest_tree", "basal_area_host_std", "perc.infested_v1", "n.infested_v1", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+large.base <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.base.sims <- simulateResiduals(large.base)
+plot(large.base.sims)
+
+summary(large.base)
+
+# Add brooms
+
+large.broom <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + brooms_recode + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.broom.sims <- simulateResiduals(large.broom)
+plot(large.broom.sims)
+
+summary(large.broom)
+
+# brooms in neighborhood
+
+large.broom.nh <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + brooms_nh + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.broom.sims <- simulateResiduals(large.broom.nh)
+plot(large.broom.sims)
+
+summary(large.broom.nh)
+
+# Add beetle
+large.beetle <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + beetle_recode + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.beetle.sims <- simulateResiduals(large.beetle)
+plot(large.beetle.sims)
+
+summary(large.beetle)
+
+# Add infest sum
+
+large.sum <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1  + infest_sum_std_new_v1 + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.sum.sims <- simulateResiduals(large.sum)
+plot(large.sum.sims)
+
+summary(large.sum)
+
+# mean distance
+
+large.mean.dis <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + mean_dist_infested_v1 + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.mean.dis.sims <- simulateResiduals(large.mean.dis)
+plot(large.mean.dis.sims)
+
+summary(large.mean.dis)
+
+
+# percent infested - 0.75 correlation with infest sum so questionable
+#large$logperc.infested_v1 <- log(large$perc.infested_v1 + 1)
+
+large.pinfest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + perc.infested_v1 + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.pinfest.sims <- simulateResiduals(large.pinfest)
+plot(large.pinfest.sims)
+
+summary(large.pinfest)
+
+# number in neighborhood
+
+large.n.nhinfest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + n + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.n.nhinfest.sims <- simulateResiduals(large.n.nhinfest)
+plot(large.n.nhinfest.sims)
+
+summary(large.n.nhinfest)
+
+# distance to nearest tree
+
+large.dist.nearinfest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + dist_nearest_tree + n + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.dist.nearinfest.sims <- simulateResiduals(large.dist.nearinfest)
+plot(large.dist.nearinfest.sims)
+
+summary(large.dist.nearinfest)
+
+# avg. dbh in neighborhood
+
+large.dbh.infest <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + dist_nearest_tree + avg.dbh + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.dbh.infest.sims <- simulateResiduals(large.dbh.infest)
+plot(large.dbh.infest.sims)
+
+summary(large.dbh.infest)
+
+## Building model above
+
+# Final Model!
+
+large.final <- glmmTMB(cbind(infested_v1, 1 - infested_v1) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + avg.dbh + (1|unique_ID) + (1|site), data = large, family = binomial(link = "logit"))
+
+large.final.sims <- simulateResiduals(large.final)
+plot(large.final.sims)
+
+summary(large.final)
+
+# lagged variables
+
+large.sm <- sm %>% filter(dbh != 1.27)
+
+large_long <- data_long %>% filter(dbh != 1.27)
+
+large.lag <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + lag_infested + avg.dbh + gouting_recode + dist_nearest_tree + perc.infested + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = large.sm, family = binomial(link = "logit"))
+
+large.lag.sims <- simulateResiduals(large.lag)
+plot(large.lag.sims)
+
+summary(large.lag)
+summary(clump.lag)
+
+large.all <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.all.sims <- simulateResiduals(large.all)
+plot(large.all.sims)
+
+summary(large.all)
+
+```
+
+
+```{r}
+tidy_large <- broom::tidy(large.lag) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_large$model <- "large.lag" 
+
+dw_large <- dwplot(tidy_large)
+
+tidy_small <- broom::tidy(clump.lag)
+
+tidy_small$model <- "clump.lag"
+
+dw_small <- dwplot(tidy_small)
+
+tidy_all <- rbind(tidy_large, tidy_small)
+
+dw_all <- dwplot(tidy_all) +
+  scale_y_discrete(
+    labels = c("logDISTANCE" = "Distance to nearest infested",
+               "lag_infested" = "Lagged infestation status",
+               "dist_nearest_tree" = "Distance to nearest tree",
+               "perc.infested" = "Percent infested (neighborhood)",
+                "gouting_recode" = "Gouting",
+                "avg.dbh" = "Average dbh in neighborhood",
+                "logdbh" = "DBH",
+                "mean_percent_live_crown_std" = "Mean percent live crown (Neighborhood)"
+      ),
+    limits = c("logDISTANCE",
+                "mean_percent_live_crown_std",
+                "avg.dbh",
+                "perc.infested",
+                "dist_nearest_tree",
+                "logdbh",
+                "gouting_recode", 
+                "lag_infested") # Specify the desired order
+  )
+
+print(dw_large+geom_vline(xintercept=0,lty=2))
+print(dw_small+geom_vline(xintercept=0,lty=2))
+print(dw_all+geom_vline(xintercept=0,lty=2))
+   
+```
+
+# Testing lagged dataset
+
+```{r}
+
+time.glmm.withlag <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + brooms_recode + lag_logDISTANCE + dist_nearest_tree + infest_sum_std_new + lag_infest_sum_std_new + Gouting + logdbh + (1|unique_ID) + (1|site), data = sm, family = binomial(link = "logit"))
+
+large.sm <- sm %>% filter(dbh != 1.27)
+
+large.lag <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE +  lag_logDISTANCE + lag_infest_sum + Gouting + brooms_recode + dist_nearest_tree + infest_sum_std_new + (1|unique_ID) + (1|site), data = large.sm, family = binomial(link = "logit"))
+
+clump.sm <- sm %>% filter(dbh == 1.27)
+
+# change n to number in neighborhood
+names(clump.sm)[25] <- "number_nh"
+
+clump.lag <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE +  lag_logDISTANCE + lag_infest_sum + Gouting + brooms_recode + infest_sum_std_new + number_nh + (1|unique_ID) + (1|site), data = clump.sm, family = binomial(link = "logit"))
+
+summary(time.glmm.withlag)
+summary(large.lag)
+summary(clump.lag)
+
+```
+
+# Question 3: What are the risk factors for new infestation?
+
+We need to make a variable for trees for new infestations and compare with trees that never got infested
+
+# Get data prepped
+```{r}
+
+# Filter out so we have just new infested and never infested
+
+new <- local_data_10 %>% filter(infested_v1 == 0) %>% filter(species == "ABLA" | species == "ABCO")
+
+new_check <- data %>% select(c("infested_v1", "infested_v2", "infested_v3", "infested_v4", "new_infested_v2", "new_infested_v3", "new_infested_v4"))
+
+
+cor(new[, c("logdbh","logheight", "DISTANCE_v1", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new_v1", "mean_dist_infested_v1", "dist_nearest_tree", "basal_area_host_std", "perc.infested_v1", "n.infested_v1", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+# lagged variables
+
+new_long <- new %>%
+  pivot_longer(
+    cols = ends_with("_v1") | ends_with("_v2") | ends_with("_v3") | ends_with("_v4"),  # columns with visit data
+    names_to = c(".value", "visit"),       # use ".value" to keep the original variable name
+    names_pattern = "(.*)_(v[0-9])"        # regex to separate variable name and visit
+  ) %>%
+  mutate(visit = as.numeric(gsub("v", "", visit)))  # Convert "v1", "v2", etc. to 1, 2, etc.
+
+names(new_long)[49] <- "t"
+
+new_long <- new_long %>%
+  dplyr::arrange(unique_ID, t) %>%
+  dplyr::group_by(unique_ID) %>%
+  dplyr::mutate(
+    lag_logDISTANCE = lag(logDISTANCE),
+    lag_infest_sum_std_new = lag(infest_sum_std_new),
+    lag_Gouting = lag(Gouting),
+    lag_infested = lag(infested),
+    lag_mean_dis = lag(mean_dist_infested),
+    lag_perc_inf = lag(perc.infested)
+  ) %>%
+  ungroup()
+
+new_three_visits <- subset(new_long, t %in% c(2, 3, 4))
+
+new_three_visits$gouting_recode <- ifelse(new_three_visits$Gouting == 0, 0, 1)
+
+new_long_check <- new_three_visits %>% select(c("infested", "new_infested"))
+
+```
+
+# Building new infestation model
+
+```{r}
+cor(new_three_visits[, c("logdbh","logheight", "logDISTANCE", "lag_logDISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new", "lag_infest_sum_std_new", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "n.infested", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+## Building model below
+
+# Start a-modelling
+
+new.base <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.base.sims <- simulateResiduals(new.base)
+plot(new.base.sims)
+
+summary(new.base)
+
+# Add gouting
+
+new.gout <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.gout.sims <- simulateResiduals(new.gout)
+plot(new.gout.sims)
+
+summary(new.gout)
+
+# Add brooms
+
+new.broom <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.broom.sims <- simulateResiduals(new.broom)
+plot(new.broom.sims)
+
+summary(new.broom)
+
+# Brooms - nh
+new.broom.nh <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_nh + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.broom.sims <- simulateResiduals(new.broom.nh)
+plot(new.broom.sims)
+
+summary(new.broom.nh)
+
+
+# Add beetle
+
+new.beetle <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.beetle.sims <- simulateResiduals(new.beetle)
+plot(new.beetle.sims)
+
+summary(new.beetle)
+
+# Add infest sum
+
+new.sum <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + infest_sum_std_new + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.sum.sims <- simulateResiduals(new.sum)
+plot(new.sum.sims)
+
+summary(new.sum)
+
+# percent infested
+
+new.pinfest <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + infest_sum_std_new + perc.infested + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.pinfest.sims <- simulateResiduals(new.pinfest)
+plot(new.pinfest.sims)
+
+summary(new.pinfest)
+
+# number in neighborhood
+
+new.n.nhinfest <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + n + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.n.nhinfest.sims <- simulateResiduals(new.n.nhinfest)
+plot(new.n.nhinfest.sims)
+
+summary(new.n.nhinfest)
+
+# add basal area host
+
+new.ba_host <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode  + infest_sum_std_new + perc.infested + n + basal_area_host_std + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.ba_host.sims <- simulateResiduals(new.ba_host)
+plot(new.ba_host.sims)
+
+summary(new.ba_host)
+
+# Tried avg.gouting, avg.dbh, n, and basal area host
+
+# Final Model!
+
+new.final <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + mean_percent_live_crown + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+ 
+new.final.sims <- simulateResiduals(new.final)
+plot(new.final.sims)
+ 
+summary(new.final)
+
+
+new.lag <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + lag_logDISTANCE + gouting_recode + dist_nearest_tree + mean_percent_live_crown + (1|unique_ID) + (1|site), data = new_three_visits, family = binomial(link = "logit"))
+
+new.lag.sims <- simulateResiduals(new.lag)
+plot(new.lag.sims)
+testDispersion(new.lag.sims)
+
+summary(new.lag)
+summary(new.final)
+
+new.all <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode + infest_sum_std_new + avg.dbh + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+ 
+new.all.sims <- simulateResiduals(new.all)
+plot(new.all.sims)
+ 
+summary(new.all)
+
+tidy_new <- broom::tidy(new.final) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_new$model <- "new" 
+
+#new.final <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + beetle_recode + infest_sum_std_new_v1 + avg.dbh + (1|unique_ID) + (1|site), data = new, family = binomial(link = "logit"))
+
+
+dw_new <- dwplot(tidy_new) +
+  scale_y_discrete(
+    labels = c("logDISTANCE" = "Distance to nearest infested",
+                "gouting_recode" = "Gouting",
+                "perc.infested" = "Percent infested (neighborhood)",
+                "mean_percent_live_crown" = "Mean percent live crown (neighborhood)",
+                "dist_nearest_tree" = "Distance to nearest tree",
+                "logdbh" = "DBH"),
+    limits = c( "logDISTANCE",
+                "mean_percent_live_crown",
+                "perc.infested",
+                "dist_nearest_tree",
+                "gouting_recode",
+                "logdbh") # Specify the desired order
+  )
+print(dw_new+geom_vline(xintercept=0,lty=2))
+
+
+#data %>% group_by(site) %>% count(data$new_infestation)
+
+# Build new infestation model with all data 
+
+# Start a-modelling
+
+new.base <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.base.sims <- simulateResiduals(new.base)
+plot(new.base.sims)
+
+summary(new.base)
+
+# Add gouting
+
+new.gout <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.gout.sims <- simulateResiduals(new.gout)
+plot(new.gout.sims)
+
+summary(new.gout)
+
+# Add brooms
+
+new.broom <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + brooms_recode + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.broom.sims <- simulateResiduals(new.broom)
+plot(new.broom.sims)
+
+summary(new.broom)
+
+# Brooms - nh
+new.broom.nh <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + brooms_nh + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.broom.sims <- simulateResiduals(new.broom.nh)
+plot(new.broom.sims)
+
+summary(new.broom.nh)
+
+
+# Add beetle
+
+new.beetle <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode + brooms_nh + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.beetle.sims <- simulateResiduals(new.beetle)
+plot(new.beetle.sims)
+
+summary(new.beetle)
+
+# Add infest sum
+
+new.sum <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode + infest_sum_std_new + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.sum.sims <- simulateResiduals(new.sum)
+plot(new.sum.sims)
+
+summary(new.sum)
+
+# percent infested
+
+new.pinfest <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode + infest_sum_std_new + perc.infested + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.pinfest.sims <- simulateResiduals(new.pinfest)
+plot(new.pinfest.sims)
+
+summary(new.pinfest)
+
+# number in neighborhood
+
+new.n.nhinfest <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + beetle_recode + n + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.n.nhinfest.sims <- simulateResiduals(new.n.nhinfest)
+plot(new.n.nhinfest.sims)
+
+summary(new.n.nhinfest)
+
+# add basal area host
+
+new.ba_host <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode  + infest_sum_std_new + n + basal_area_host_std + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.ba_host.sims <- simulateResiduals(new.ba_host)
+plot(new.ba_host.sims)
+
+summary(new.ba_host)
+
+# Final Model!
+
+new.final <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + infest_sum_std_new + avg.dbh + (1|unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+ 
+new.final.sims <- simulateResiduals(new.final)
+plot(new.final.sims)
+ 
+summary(new.final)
+
+testDispersion(new.final.sims)
+```
+
+## New infestations with spatial weights
+
+### Data prep
+```{r}
+proportions_list_new <- list()
+
+for (site in unique(all_merged$site)) {
+  
+  # Filter focal and complete datasets for the site
+  site_focal <- filter(new_three_visits, site == !!site)   # Focal points to buffer
+  site_complete <- filter(all_merged, site == !!site)  # All points for bounding box
+  
+  # Convert focal points (already in UTM) to sf
+  site_focal_sf <- st_as_sf(site_focal, coords = c("Longitude", "Latitude"), crs = 32612)
+  
+  # Convert complete dataset (in decimal degrees) to sf and transform to UTM
+  site_complete_sf <- st_as_sf(site_complete, coords = c("Longitude", "Latitude"), crs = 4326)
+  site_complete_utm <- st_transform(site_complete_sf, 32612)  # Transform to UTM
+  
+  # Get bounding box for the site in UTM
+  site_bbox <- st_as_sfc(st_bbox(site_complete_utm))
+  
+  # Loop through each focal point and calculate proportions
+  site_proportions <- sapply(1:nrow(site_focal_sf), function(i) {
+    
+    # Create a 10m buffer for the focal point
+    buffer <- suppressWarnings(st_buffer(st_geometry(site_focal_sf)[i], dist = 10))
+    
+    # Compute the intersection between the buffer and the bounding box
+    intersection <- suppressWarnings(st_intersection(buffer, site_bbox))
+    
+    # Calculate areas (buffer area and intersection area)
+    circle_area <- suppressWarnings(st_area(buffer))
+    intersection_area <- suppressWarnings(st_area(intersection))
+    
+    # Calculate proportion of buffer inside the bounding box
+    proportion <- as.numeric(intersection_area / circle_area)
+    
+    return(proportion)
+  })
+  
+  # Store the proportions for the current site
+  proportions_list_new[[site]] <- site_proportions
+  
+  # Print progress for debugging
+  cat("Processed", site, "with", length(site_proportions), "focal points.\n")
+}
+
+
+# Now append these proportions to the original focal dataset
+new_with_proportions <- new_three_visits %>%
+  mutate(proportion = unlist(proportions_list_new))
+
+# Spatial weighting
+model_data_new <- new_with_proportions
+model_data_new$infest_sum_std_new <- model_data_new$infest_sum_std_new * model_data_new$proportion
+model_data_new$avg.dbh <- model_data_new$avg.dbh * model_data_new$proportion
+model_data_new$mean_percent_live_crown_std <- model_data_new$mean_percent_live_crown_std * model_data_new$proportion
+model_data_new$brooms_nh <- model_data_new$brooms_nh * model_data_new$proportion
+model_data_new$perc.infested <- model_data_new$perc.infested * model_data_new$proportion
+model_data_new$basal_area_host_std <- model_data_new$basal_area_host_std * model_data_new$proportion
+model_data_new$mean_dist_infested_recode <- model_data_new$mean_dist_infested_recode * model_data_new$proportion
+model_data_new$n <- model_data_new$n * model_data_new$proportion
+
+# Filter live
+model_data_new$`Dead / Alive`[is.na(model_data_new$`Dead / Alive`)] <- 0
+model_data_new <- filter(model_data_new, model_data_new$`Dead / Alive` == 1)
+```
+
+
+### Model Building - New infestation with Spatial weights
+
+```{r}
+cor(model_data_new[, c("logdbh", "logDISTANCE", "lag_logDISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+## Building model below
+
+# Start a-modelling
+
+new.base.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.base.sp.sims <- simulateResiduals(new.base.sp)
+plot(new.base.sp.sims)
+
+summary(new.base.sp)
+
+# Add gouting
+
+new.gout.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.gout.sp.sims <- simulateResiduals(new.gout.sp)
+plot(new.gout.sp.sims)
+
+summary(new.gout.sp)
+
+# Add brooms
+
+new.broom.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.broom.sp.sims <- simulateResiduals(new.broom.sp)
+plot(new.broom.sp.sims)
+
+summary(new.broom.sp)
+
+# Brooms - nh
+new.broom.sp.nh <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + brooms_nh + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.broom.sp.sims <- simulateResiduals(new.broom.sp.nh)
+plot(new.broom.sp.sims)
+
+summary(new.broom.sp.nh)
+
+
+# Add beetle
+
+new.beetle.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + beetle_recode + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.beetle.sims.sp <- simulateResiduals(new.beetle.sp)
+plot(new.beetle.sims.sp)
+
+summary(new.beetle.sp)
+
+# percent infested
+
+new.pinfest.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.pinfest.sims.sp <- simulateResiduals(new.pinfest.sp)
+plot(new.pinfest.sims.sp)
+
+summary(new.pinfest.sp)
+
+# number in neighborhood
+
+new.n.nh.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.n.nh.sims.sp <- simulateResiduals(new.n.nh.sp)
+plot(new.n.nh.sims.sp)
+
+summary(new.n.nh.sp)
+
+# add basal area host
+
+new.ba_host.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + basal_area_host_std + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.ba_host.sims.sp <- simulateResiduals(new.ba_host.sp)
+plot(new.ba_host.sims.sp)
+
+summary(new.ba_host.sp)
+
+# avg.gouting
+
+new.gouting.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + avg.gouting + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.gouting.sims.sp <- simulateResiduals(new.gouting.sp)
+plot(new.gouting.sims.sp)
+
+summary(new.gouting.sp)
+
+# avg.dbh
+
+new.avgdbh.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + avg.dbh + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.avgdbh.sims.sp <- simulateResiduals(new.avgdbh.sp)
+plot(new.avgdbh.sims.sp)
+
+summary(new.avgdbh.sp)
+
+# Mean percent live crown
+
+new.crown.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.crown.sims.sp <- simulateResiduals(new.crown.sp)
+plot(new.crown.sims.sp)
+
+summary(new.crown.sp)
+
+# distance to nearest tree
+
+new.dist.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + mean_percent_live_crown_std + n + dist_nearest_tree + (1|unique_ID) + (1|site), data = model_data_new, family = binomial(link = "logit"))
+
+new.dist.sims.sp <- simulateResiduals(new.dist.sp)
+plot(new.dist.sims.sp)
+
+summary(new.dist.sp)
+
+# Final Model!
+
+# lag_logDISTANCE doesn't come out, but lag percentage infested does
+
+# Beetle has very large confidence interval due to small number of observations, which warrants exclusion. 
+
+new.final.sp <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + lag_perc_inf + mean_percent_live_crown_std + n + DISTANCE_noinfest + (1|site), data = model_data_new, family = binomial(link = "logit"))
+ 
+new.final.sims.sp <- simulateResiduals(new.final.sp)
+plot(new.final.sims.sp)
+ 
+summary(new.final.sp)
+r2(new.final.sp)
+check_singularity(new.final.sp)
+```
+
+### Coef plot - new infestation spatial weights
+
+```{r}
+new.final <- broom::tidy(new.final.sp) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+new.final$model <- "new.final.sp" 
+
+dw_new_final <- dwplot(new.final) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "perc.infested" = "Percent Infested (neighborhood)",
+               "lag_perc_inf" = "Lagged percent infested (neighborhood)",
+               "DISTANCE_noinfest" = "Distance to nearest tree > 2.54cm",
+                "gouting_recode" = "Gouting",
+                "mean_percent_live_crown_std" = "Mean percent live crown (neighborhood)",
+                "logdbh" = "DBH",
+                "n" = "Number of trees in neighborhood"
+      ),
+    limits = c( "logDISTANCE",
+                "mean_percent_live_crown_std",
+                "lag_perc_inf",
+                "n",
+                "perc.infested",
+                "DISTANCE_noinfest",
+                "gouting_recode",
+                "logdbh"
+                ) # Specify the desired order
+  )
+
+
+print(dw_new_final+geom_vline(xintercept=0,lty=2))
+```
+
+### New infestation model removing observations after new infestation
+
+```{r}
+new_data_remove <- model_data_new %>% filter(!(infested == 1 & new_infested == 0))
+
+new.base.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.base.rem.sims <- simulateResiduals(new.base.rem)
+plot(new.base.rem.sims)
+
+summary(new.base.rem)
+
+# Add gouting
+
+new.gout.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.gout.rem.sims <- simulateResiduals(new.gout.rem)
+plot(new.gout.rem.sims)
+
+summary(new.gout.rem)
+
+# Add brooms
+
+new.broom.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.broom.rem.sims <- simulateResiduals(new.broom.rem)
+plot(new.broom.rem.sims)
+
+summary(new.broom.rem)
+
+# Brooms - nh
+new.broom.rem.nh <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + brooms_nh + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.broom.rem.sims <- simulateResiduals(new.broom.rem.nh)
+plot(new.broom.rem.sims)
+
+summary(new.broom.rem.nh)
+
+
+# Add beetle
+
+new.beetle.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.beetle.sims.rem <- simulateResiduals(new.beetle.rem)
+plot(new.beetle.sims.rem)
+
+summary(new.beetle.rem)
+
+# percent infested
+
+new.pinfest.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.pinfest.sims.rem <- simulateResiduals(new.pinfest.rem)
+plot(new.pinfest.sims.rem)
+
+summary(new.pinfest.rem)
+
+# number in neighborhood
+
+new.n.nh.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.n.nh.sims.rem <- simulateResiduals(new.n.nh.rem)
+plot(new.n.nh.sims.rem)
+
+summary(new.n.nh.rem)
+
+# add basal area host
+
+new.ba_host.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + basal_area_host_std + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.ba_host.sims.rem <- simulateResiduals(new.ba_host.rem)
+plot(new.ba_host.sims.rem)
+
+summary(new.ba_host.rem)
+
+# avg.gouting
+
+new.gouting.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + avg.gouting + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.gouting.sims.rem <- simulateResiduals(new.gouting.rem)
+plot(new.gouting.sims.rem)
+
+summary(new.gouting.rem)
+
+# avg.dbh
+
+new.avgdbh.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + avg.dbh + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.avgdbh.sims.rem <- simulateResiduals(new.avgdbh.rem)
+plot(new.avgdbh.sims.rem)
+
+summary(new.avgdbh.rem)
+
+# Mean percent live crown
+
+new.crown.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + n + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.crown.sims.rem <- simulateResiduals(new.crown.rem)
+plot(new.crown.sims.rem)
+
+summary(new.crown.rem)
+
+# distance to nearest tree
+
+new.dist.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + perc.infested + mean_percent_live_crown_std + n + dist_nearest_tree + (1|unique_ID) + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.dist.sims.rem <- simulateResiduals(new.dist.rem)
+plot(new.dist.sims.rem)
+
+summary(new.dist.rem)
+
+# Lagged vars
+
+new.lag.rem <- glmmTMB(cbind(new_infested, 1 - new_infested) ~ logdbh + logDISTANCE + gouting_recode 
+  #+ beetle_recode 
+  + lag_perc_inf + perc.infested + mean_percent_live_crown_std + n + dist_nearest_tree + (1|site), data = new_data_remove, family = binomial(link = "logit"))
+
+new.lag.sims.rem <- simulateResiduals(new.lag.rem)
+plot(new.dist.sims.rem)
+
+summary(new.lag.rem)
+r2(new.lag.rem)
+
+```
+
+### Coef plot - new infestation spatial weights removing trees after infestation
+
+```{r}
+new.rem <- broom::tidy(new.lag.rem) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+new.rem$model <- "new.lag.rem" 
+
+dw_new_rem <- dwplot(new.rem) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "perc.infested" = "Percent Infested (neighborhood)",
+               "lag_perc_inf" = "Lagged percent infested (neighborhood)",
+               "dist_nearest_tree" = "Distance to nearest tree",
+                "gouting_recode" = "Gouting",
+                #"beetle_recode" = "Beetle - presence/absence",
+                #"mean_percent_live_crown_std" = "Mean percent live crown (neighborhood)",
+                "logdbh" = "DBH",
+                "n" = "Number of trees in neighborhood"
+      ),
+    limits = c( "logDISTANCE",
+                #"beetle_recode",
+                #"mean_percent_live_crown_std",
+                "lag_perc_inf",
+                "n",
+                "perc.infested",
+                "dist_nearest_tree",
+                "gouting_recode",
+                "logdbh"
+                ) # Specify the desired order
+  )
+
+
+print(dw_new_rem+geom_vline(xintercept=0,lty=2))
+```
+
+
+# Question 4: What factors influence changes in infestation level?
+
+```{r}
+cor(data[, c("logdbh", "logDISTANCE_v1", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new_v1", "dist_nearest_tree", "basal_area_host_std", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+# Start a-modelling
+
+sum.base <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.base.sims <- simulateResiduals(sum.base)
+plot(sum.base.sims)
+
+summary(sum.base)
+
+# Add gouting
+
+sum.gout <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + logheight + Gouting_v1 + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.gout.sims <- simulateResiduals(sum.gout)
+plot(sum.gout.sims)
+
+summary(sum.gout)
+
+# Add brooms
+
+sum.broom <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + logheight + Gouting_v1 + brooms_recode + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.broom.sims <- simulateResiduals(sum.broom)
+plot(sum.broom.sims)
+
+summary(sum.broom)
+
+# Brooms - nh
+
+sum.broom.nh <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + logheight + Gouting_v1 + brooms_nh + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.broom.sims <- simulateResiduals(sum.broom.nh)
+plot(sum.broom.sims)
+
+summary(sum.broom.nh)
+
+# Add beetle
+
+sum.beetle <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + Gouting_v1 + beetle_recode + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.beetle.sims <- simulateResiduals(sum.beetle)
+plot(sum.beetle.sims)
+
+summary(sum.beetle)
+
+# Add infest sum
+
+sum.sum <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.sum.sims <- simulateResiduals(sum.sum)
+plot(sum.sum.sims)
+
+summary(sum.sum)
+
+# number in neighborhood
+
+sum.n.nhinfest <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + n + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.n.nhinfest.sims <- simulateResiduals(sum.n.nhinfest)
+plot(sum.n.nhinfest.sims)
+
+summary(sum.n.nhinfest)
+
+# add basal area host
+
+sum.ba_host <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + n + basal_area_host_std + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.ba_host.sims <- simulateResiduals(sum.ba_host)
+plot(sum.ba_host.sims)
+
+summary(sum.ba_host)
+
+# Average DBH
+
+sum.avg.dbh <- glmmTMB(infestation_sum_v1 ~ logdbh + logDISTANCE_v1 + Gouting_v1 + infest_sum_std_new_v1 + n + avg.dbh + (1|unique_ID) + (1|site), data = data, family = nbinom2)
+
+sum.avg.dbh.sims <- simulateResiduals(sum.avg.dbh)
+plot(sum.avg.dbh.sims)
+
+summary(sum.avg.dbh)
+
+# distance to nearest tree
+sum.dist <- glmmTMB(infestation_sum_v1 ~ infest_sum_std_new_v1 + dist_nearest_tree + Gouting_v1 + logDISTANCE_v1 + logdbh + n + avg.dbh + (1|site) + (1|unique_ID), data = data, family = nbinom2)
+
+sum.dist.sims <- simulateResiduals(sum.dist)
+plot(sum.dist.sims)
+
+summary(sum.dist)
+
+# mean percent live crown
+sum.mean.perc <- glmmTMB(infestation_sum_v1 ~ infest_sum_std_new_v1 + dist_nearest_tree + Gouting_v1 + logDISTANCE_v1 + logdbh + n + avg.dbh + mean_percent_live_crown_std + (1|site) + (1|unique_ID), data = data, family = nbinom2)
+
+sum.mperc.sims <- simulateResiduals(sum.mean.perc)
+plot(sum.mperc.sims)
+
+summary(sum.mean.perc)
+
+# Final
+
+sum.final <- glmmTMB(infestation_sum_v1 ~ infest_sum_std_new_v1 + dist_nearest_tree + Gouting_v1 + logDISTANCE_v1 + logdbh + avg.dbh + (1|site) + (1|unique_ID), data = data, family = nbinom2)
+
+sum.final.sims <- simulateResiduals(sum.final)
+plot(sum.final.sims)
+
+summary(sum.final)
+
+# Final model with lagged variables
+
+cor(sm[, c("logdbh", "logDISTANCE", "lag_logDISTANCE", "lag_infest_sum_std_new", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new", "dist_nearest_tree", "basal_area_host_std", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n")])
+
+
+sum.time <- glmmTMB(infestation_sum ~  logdbh + logDISTANCE + lag_logDISTANCE + dist_nearest_tree + gouting_recode + avg.dbh + infest_sum_std_new + lag_infest_sum_std_new + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = sm, family = nbinom2)
+
+sum.time.sims <- simulateResiduals(sum.time)
+plot(sum.time.sims)
+testDispersion(sum.time.sims)
+
+summary(sum.time)
+summary(time.glmm.lag.interact) # lagged model for infestation status
+
+coef_plot_sum <- ggcoef_model(sum.time)
+coef_plot_status <- ggcoef_model(time.glmm.lag.interact)
+
+tidy_sum <- broom::tidy(sum.time) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_sum$model <- "sum" 
+
+#new.final <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE_v1 + Gouting_v1 + beetle_recode + infest_sum_std_new_v1 + avg.dbh + (1|unique_ID) + (1|site), data = new, family = binomial(link = "logit"))
+
+
+dw_sum <- dwplot(tidy_sum) +
+  scale_y_discrete(
+    labels = c( "logDISTANCE" = "Distance to nearest infested",
+                "gouting_recode" = "Gouting",
+                "lag_logDISTANCE" = "Lagged distance to nearest infested",
+                "mean_percent_live_crown_std" = "Mean percent live crown (neighborhood)",
+                "dist_nearest_tree" = "Distance to nearest tree",
+                "logdbh" = "DBH",
+                "lag_infest_sum_std_new" = "Lagged infestation sum (neighborhood)",
+                "infest_sum_std_new" = "Infestation sum (neighborhood)",
+                "avg.dbh" = "Average DBH (neighborhood)"),
+    limits = c( "logDISTANCE",
+                "lag_logDISTANCE",
+                "mean_percent_live_crown_std",
+                "avg.dbh",
+                #"lag_infest_sum_std_new",
+                "gouting_recode",
+                "infest_sum_std_new",
+                "dist_nearest_tree",
+                "logdbh") # Specify the desired order
+  )
+print(dw_sum+geom_vline(xintercept=0,lty=2))
+
+```
+
+## Building sum with long data
+
+```{r}
+
+# Building sum with long data
+
+sum.base_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.base_long.sims <- simulateResiduals(sum.base_long)
+plot(sum.base_long.sims)
+
+summary(sum.base_long)
+
+# Add gouting
+
+sum.gout_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.gout_long.sims <- simulateResiduals(sum.gout_long)
+plot(sum.gout_long.sims)
+
+summary(sum.gout_long)
+
+# Add brooms
+
+sum.broom_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + brooms_recode + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.broom_long.sims <- simulateResiduals(sum.broom_long)
+plot(sum.broom_long.sims)
+
+summary(sum.broom_long)
+
+# Brooms - nh
+
+sum.broom.nh_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + brooms_nh + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.broom_long.sims <- simulateResiduals(sum.broom.nh_long)
+plot(sum.broom_long.sims)
+
+summary(sum.broom.nh_long)
+
+# Add beetle
+
+sum.beetle_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + beetle_recode + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.beetle_long.sims <- simulateResiduals(sum.beetle_long)
+plot(sum.beetle_long.sims)
+
+summary(sum.beetle_long)
+
+# Add infest sum
+
+sum.sum_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.sum_long.sims <- simulateResiduals(sum.sum_long)
+plot(sum.sum_long.sims)
+
+summary(sum.sum_long)
+
+# number in neighborhood
+
+sum.n.nhinfest_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + n + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.n.nhinfest_long.sims <- simulateResiduals(sum.n.nhinfest_long)
+plot(sum.n.nhinfest_long.sims)
+
+summary(sum.n.nhinfest_long)
+
+# add basal area host
+
+sum.ba_host_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + n + basal_area_host_std + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.ba_host_long.sims <- simulateResiduals(sum.ba_host_long)
+plot(sum.ba_host_long.sims)
+
+summary(sum.ba_host_long)
+
+# Average DBH
+
+sum.avg.dbh_long <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + n + avg.dbh + (1|unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.avg.dbh_long.sims <- simulateResiduals(sum.avg.dbh_long)
+plot(sum.avg.dbh_long.sims)
+
+summary(sum.avg.dbh_long)
+
+# distance to nearest tree
+sum.dist_long <- glmmTMB(infestation_sum ~ infest_sum_std_new + dist_nearest_tree + Gouting + logDISTANCE + logdbh + n + avg.dbh + (1|site) + (1|unique_ID), data = data_long, family = nbinom2)
+
+sum.dist_long.sims <- simulateResiduals(sum.dist_long)
+plot(sum.dist_long.sims)
+
+summary(sum.dist_long)
+
+# Final
+
+sum.final_long <- glmmTMB(log(infestation_sum + 1) ~ infest_sum_std_new + dist_nearest_tree + Gouting + logDISTANCE + logdbh + avg.dbh + (1|site) + (1|unique_ID), data = data_long, family = nbinom2)
+
+sum.final_long.sims <- simulateResiduals(sum.final_long)
+plot(sum.final_long.sims)
+
+summary(sum.final_long)
+
+coef_plot_sum <- ggcoef_model(sum.time)
+coef_plot_sum_long <- ggcoef_model(sum.final_long)
+
+testDispersion(sum.final_long.sims)
+
+print(coef_plot_sum)
+print(coef_plot_sum_long)
+
+```
+
+
+## Sum model with spatial weights
+
+### Data prep
+
+```{r}
+all_merged$site <- as.factor(all_merged$site)
+
+proportions_list <- list()
+
+for (site in unique(all_merged$site)) {
+  
+  # Filter focal and complete datasets for the site
+  site_focal <- filter(sm, site == !!site)   # Focal points to buffer
+  site_complete <- filter(all_merged, site == !!site)  # All points for bounding box
+  
+  # Convert focal points (already in UTM) to sf
+  site_focal_sf <- st_as_sf(site_focal, coords = c("Longitude", "Latitude"), crs = 32612)
+  
+  # Convert complete dataset (in decimal degrees) to sf and transform to UTM
+  site_complete_sf <- st_as_sf(site_complete, coords = c("Longitude", "Latitude"), crs = 4326)
+  site_complete_utm <- st_transform(site_complete_sf, 32612)  # Transform to UTM
+  
+  # Get bounding box for the site in UTM
+  site_bbox <- st_as_sfc(st_bbox(site_complete_utm))
+  
+  # Loop through each focal point and calculate proportions
+  site_proportions <- sapply(1:nrow(site_focal_sf), function(i) {
+    
+    # Create a 10m buffer for the focal point
+    buffer <- suppressWarnings(st_buffer(st_geometry(site_focal_sf)[i], dist = 10))
+    
+    # Compute the intersection between the buffer and the bounding box
+    intersection <- suppressWarnings(st_intersection(buffer, site_bbox))
+    
+    # Calculate areas (buffer area and intersection area)
+    circle_area <- suppressWarnings(st_area(buffer))
+    intersection_area <- suppressWarnings(st_area(intersection))
+    
+    # Calculate proportion of buffer inside the bounding box
+    proportion <- as.numeric(intersection_area / circle_area)
+    
+    return(proportion)
+  })
+  
+  # Store the proportions for the current site
+  proportions_list[[site]] <- site_proportions
+  
+  # Print progress for debugging
+  cat("Processed", site, "with", length(site_proportions), "focal points.\n")
+}
+
+
+# Now append these proportions to the original focal dataset
+sm_with_proportions <- sm %>%
+  mutate(proportion = unlist(proportions_list))
+
+# View the updated focal dataset with proportions
+View(sm_with_proportions)
+
+# update neighborhood metrics with spatial weights
+model_data <- sm_with_proportions
+model_data$infest_sum_std_new <- model_data$infest_sum_std_new * model_data$proportion
+model_data$avg.dbh <- model_data$avg.dbh * model_data$proportion
+model_data$mean_percent_live_crown_std <- model_data$mean_percent_live_crown_std * model_data$proportion
+model_data$brooms_nh <- model_data$brooms_nh * model_data$proportion
+model_data$perc.infested <- model_data$perc.infested * model_data$proportion
+model_data$basal_area_host_std <- model_data$basal_area_host_std * model_data$proportion
+model_data$mean_dist_infested_recode <- model_data$mean_dist_infested_recode * model_data$proportion
+model_data$n <- model_data$n * model_data$proportion
+model_data$basal_area_nh_std <- model_data$basal_area_nh_std * model_data$proportion
+model_data$comp_index <- model_data$comp_index * model_data$proportion
+
+model_data$log_DISTANCE_noinfest <- log(model_data$DISTANCE_noinfest)
+
+
+# Filter live
+model_data$`Dead / Alive`[is.na(model_data$`Dead / Alive`)] <- 0
+model_data <- filter(model_data, model_data$`Dead / Alive` == 1)
+```
+
+### Building sum model
+```{r}
+
+sum.base.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.base.sp.sims <- simulateResiduals(sum.base.sp)
+plot(sum.base.sp.sims)
+
+summary(sum.base.sp)
+
+# Add gouting
+
+sum.gout.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + gouting_recode + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.gout.sp.sims <- simulateResiduals(sum.gout.sp)
+plot(sum.gout.sp.sims)
+
+summary(sum.gout.sp)
+
+# Add brooms
+
+sum.broom.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + gouting_recode + brooms_recode + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.broom.sp.sims <- simulateResiduals(sum.broom.sp)
+plot(sum.broom.sp.sims)
+
+summary(sum.broom.sp)
+
+# Brooms - nh
+
+sum.broom.nh.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + gouting_recode + brooms_nh + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.broom.sp.sims <- simulateResiduals(sum.broom.nh.sp)
+plot(sum.broom.sp.sims)
+
+summary(sum.broom.nh.sp)
+
+# Add beetle
+
+sum.beetle.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.beetle.sp.sims <- simulateResiduals(sum.beetle.sp)
+plot(sum.beetle.sp.sims)
+
+summary(sum.beetle.sp)
+
+# percent infested neighborhood
+
+sum.perc.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + gouting_recode + perc.infested + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.perc.sp.sims <- simulateResiduals(sum.perc.sp)
+plot(sum.perc.sp.sims)
+
+summary(sum.perc.sp)
+
+# number in neighborhood
+
+sum.n.nhinfest.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + gouting_recode + perc.infested + n + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.n.nhinfest.sp.sims <- simulateResiduals(sum.n.nhinfest.sp)
+plot(sum.n.nhinfest.sp.sims)
+
+summary(sum.n.nhinfest.sp)
+
+# add basal area host
+
+sum.ba_host.sp <- glmmTMB(log(infestation_sum + 1) ~ logdbh + logDISTANCE + gouting_recode + perc.infested  + basal_area_host_std + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.ba_host.sp.sims <- simulateResiduals(sum.ba_host.sp)
+plot(sum.ba_host.sp.sims)
+
+summary(sum.ba_host.sp)
+
+# Average DBH
+
+sum.avg.dbh.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + gouting_recode + perc.infested + avg.dbh + (1|unique_ID) + (1|site),
+  data = model_data, 
+  family = nbinom2)
+
+
+sum.avg.dbh.sp.sims <- simulateResiduals(sum.avg.dbh.sp)
+plot(sum.avg.dbh.sp.sims)
+
+summary(sum.avg.dbh.sp)
+
+# distance to nearest tree
+sum.dist.sp <- glmmTMB(infestation_sum ~ perc.infested + dist_nearest_tree + gouting_recode + logDISTANCE + logdbh + (1|site) + (1|unique_ID), data = model_data, family = nbinom2)
+
+sum.dist.sp.sims <- simulateResiduals(sum.dist.sp)
+plot(sum.dist.sp.sims)
+
+summary(sum.dist.sp)
+
+# avg. gouting
+
+sum.avg.dbh.sp <- glmmTMB(log(infestation_sum + 1) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + avg.dbh + dist_nearest_tree + avg.gouting + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.avg.dbh.sp.sims <- simulateResiduals(sum.avg.dbh.sp)
+plot(sum.avg.dbh.sp.sims)
+
+summary(sum.avg.dbh.sp)
+
+# mean percent live crown
+
+sum.crown.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + avg.gouting + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = model_data, family = nbinom2)
+
+sum.crown.sp.sims <- simulateResiduals(sum.crown.sp)
+plot(sum.crown.sp.sims)
+
+summary(sum.crown.sp)
+
+# Outlier problem
+# Define outlier threshold
+upper_bound <- quantile(model_data$infestation_sum, 0.95)
+
+# Find outliers
+outliers <- which(model_data$infestation_sum > upper_bound)
+
+# View outliers
+print(model_data[outliers, ])
+
+model_data_clean <- model_data[-outliers, ]
+
+# Final
+
+# re-scale sum
+model_data$infestation_sum_scaled <- scale(model_data$infestation_sum)
+
+# standardize infestation sum
+model_data$infestation_sum_std <- (model_data$infestation_sum - mean(model_data$infestation_sum))/sd(model_data$infestation_sum)
+
+# These two do the same thing ^^
+
+sum.final.sp <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + avg.gouting + mean_percent_live_crown_std + exp(Longitude, Latitude) + (1|unique_ID) + (1|site), 
+  data = model_data, 
+  #ziformula = ~ 1,
+  family = nbinom2)
+
+sum.final.sp.sims <- simulateResiduals(sum.final.sp.poly)
+plot(sum.final.sp.sims)
+
+# Attempting a GAM - takes way too long to fit
+# sum.final.sp <- gam(
+#   infestation_sum ~ s(Longitude, Latitude, bs = "gp") + logdbh + logDISTANCE + 
+#     gouting_recode + perc.infested + dist_nearest_tree + avg.gouting + 
+#     mean_percent_live_crown_std + s(unique_ID, bs = "re") + s(site, bs = "re"),
+#   data = model_data,
+#   family = nb()
+# )
+
+# Attempting spatial process
+
+# Standardize coordinates within each site
+model_data <- model_data %>%
+  group_by(site) %>%
+  mutate(X_scaled = scale(Longitude), Y_scaled = scale(Latitude)) %>%
+  ungroup()
+
+# Scaling attempt
+
+model_data_scaled <- model_data %>%
+  mutate(
+    logdbh = scale(logdbh),
+    logDISTANCE = scale(logDISTANCE),
+    gouting_recode = scale(gouting_recode),
+    perc.infested = scale(perc.infested),
+    dist_nearest_tree = scale(dist_nearest_tree),
+    avg.gouting = scale(avg.gouting)
+  )
+
+spatial_model <- glmmTMB(
+  infestation_sum ~ logdbh + logDISTANCE + gouting_recode + perc.infested + 
+    dist_nearest_tree + avg.gouting + mean_percent_live_crown_std +
+    (1 | unique_ID) + (1 | site),  
+  data = model_data_scaled,
+  family = nbinom1
+)
+
+spatial.sims <- simulateResiduals(spatial_model)
+plot(spatial.sims)
+
+summary(spatial_model)
+
+library(ggstats)
+coef_plot_sum <- ggcoef_model(sum.time)
+coef_plot_sum.sp <- ggcoef_model(sum.final.sp)
+
+testDispersion(sum.final.sp.sims)
+testZeroInflation(sum.final.sp.sims)
+
+print(coef_plot_sum)
+print(coef_plot_sum.sp)
+
+coords <- model_data[, c("Longitude", "Latitude")]
+nb <- dnearneigh(as.matrix(coords), 0, 10)  # Adjust range as needed
+moran.test(residuals(sum.final.sp), nb2listw(nb))
+
+# None of these are working, so we'll try to change dependent variable to change in infestation at each time step
+
+# Get spatial weights for all of our points, because we need to calculate change in infesatio
+
+all_merged$site <- as.factor(all_merged$site)
+
+proportions_list <- list()
+
+for (site in unique(all_merged$site)) {
+  
+  # Filter focal and complete datasets for the site
+  site_focal <- filter(data_long, site == !!site)   # Focal points to buffer
+  site_complete <- filter(all_merged, site == !!site)  # All points for bounding box
+  
+  # Convert focal points (already in UTM) to sf
+  site_focal_sf <- st_as_sf(site_focal, coords = c("Longitude", "Latitude"), crs = 32612)
+  
+  # Convert complete dataset (in decimal degrees) to sf and transform to UTM
+  site_complete_sf <- st_as_sf(site_complete, coords = c("Longitude", "Latitude"), crs = 4326)
+  site_complete_utm <- st_transform(site_complete_sf, 32612)  # Transform to UTM
+  
+  # Get bounding box for the site in UTM
+  site_bbox <- st_as_sfc(st_bbox(site_complete_utm))
+  
+  # Loop through each focal point and calculate proportions
+  site_proportions <- sapply(1:nrow(site_focal_sf), function(i) {
+    
+    # Create a 10m buffer for the focal point
+    buffer <- suppressWarnings(st_buffer(st_geometry(site_focal_sf)[i], dist = 10))
+    
+    # Compute the intersection between the buffer and the bounding box
+    intersection <- suppressWarnings(st_intersection(buffer, site_bbox))
+    
+    # Calculate areas (buffer area and intersection area)
+    circle_area <- suppressWarnings(st_area(buffer))
+    intersection_area <- suppressWarnings(st_area(intersection))
+    
+    # Calculate proportion of buffer inside the bounding box
+    proportion <- as.numeric(intersection_area / circle_area)
+    
+    return(proportion)
+  })
+  
+  # Store the proportions for the current site
+  proportions_list[[site]] <- site_proportions
+  
+  # Print progress for debugging
+  cat("Processed", site, "with", length(site_proportions), "focal points.\n")
+}
+
+
+# Now append these proportions to the original focal dataset
+long_with_proportions <- data_long %>%
+  mutate(proportion = unlist(proportions_list))
+
+# View the updated focal dataset with proportions
+View(long_with_proportions)
+
+# update neighborhood metrics with spatial weights
+sum_model_data <- long_with_proportions
+sum_model_data$infest_sum_std_new <- sum_model_data$infest_sum_std_new * sum_model_data$proportion
+sum_model_data$avg.dbh <- sum_model_data$avg.dbh * sum_model_data$proportion
+sum_model_data$mean_percent_live_crown_std <- sum_model_data$mean_percent_live_crown_std * sum_model_data$proportion
+sum_model_data$brooms_nh <- sum_model_data$brooms_nh * sum_model_data$proportion
+sum_model_data$perc.infested <- sum_model_data$perc.infested * sum_model_data$proportion
+sum_model_data$basal_area_host_std <- sum_model_data$basal_area_host_std * sum_model_data$proportion
+sum_model_data$mean_dist_infested_recode <- sum_model_data$mean_dist_infested_recode * sum_model_data$proportion
+sum_model_data$n <- sum_model_data$n * sum_model_data$proportion
+
+# Filter live
+sum_model_data$`Dead / Alive`[is.na(sum_model_data$`Dead / Alive`)] <- 0
+sum_model_data <- filter(sum_model_data, sum_model_data$`Dead / Alive` == 1)
+
+# make change in infestation metric
+# re-scale sum
+sum_model_data$infestation_sum_scaled <- scale(sum_model_data$infestation_sum)
+
+sum_model_data <- sum_model_data %>%
+  arrange(unique_ID, t) %>%
+  group_by(unique_ID) %>%
+  mutate(change_in_infestation = infestation_sum_scaled - lag(infestation_sum_scaled)) %>%
+  ungroup()
+
+sum_model_data <- subset(sum_model_data, t %in% c(2, 3, 4))
+
+# remove NA observations in change
+
+sum_model_data <- filter(sum_model_data, !is.na(sum_model_data$change_in_infestation))
+sum_model_data$perc.infested_std <- scale(sum_model_data$perc.infested)
+#sum_model_data$change_in_infestation_positive <- sqrt(sum_model_data$change_in_infestation + abs(min(sum_model_data$change_in_infestation)) + 1)
+sum_model_data$lag_infestation_sum[is.na(sum_model_data$lag_infestation_sum)] <- 0
+sum_model_data$lag_infestation_sum_std <- scale(sum_model_data$lag_infestation_sum)
+
+sum_model_data$logdbh_std <- scale(sum_model_data$logdbh)
+sum_model_data$logDISTANCE_std <- scale(sum_model_data$logDISTANCE)
+
+sum_model <- glmmTMB(
+  change_in_infestation_positive ~ logdbh + logDISTANCE + gouting_recode + perc.infested_std + dist_nearest_tree + avg.gouting + mean_percent_live_crown_std +
+    (1 | unique_ID) + (1 | site),  
+  data = sum_model_data,
+  family = gamma
+)
+
+sum_model_std <- glmmTMB(change_in_infestation ~ logdbh + logDISTANCE + lag_infestation_sum, 
+  #+ gouting_recode + perc.infested_std + dist_nearest_tree + avg.gouting + mean_percent_live_crown_std + (1|site),
+  ziformula = ~ logdbh + logDISTANCE + lag_infestation_sum,
+  #+ gouting_recode + perc.infested_std + dist_nearest_tree + avg.gouting + mean_percent_live_crown_std,
+  data = sum_model_data, 
+  family = tweedie(link = "log"))
+
+summary(sum_model_std)
+r2(sum_model_std)
+
+sum.sims <- simulateResiduals(sum_model_std)
+plot(sum.sims)
+
+pairs(sum_model_data[, c("change_in_infestation", "logdbh", "logDISTANCE", "perc.infested_std", "dist_nearest_tree", "avg.gouting", "mean_percent_live_crown_std")])
+
+cor(sum_model_data[, c("logdbh", "logDISTANCE", "lag_logDISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "dist_nearest_tree", "basal_area_host_std","infest_sum_std", "perc.infested", "perc.infested_std", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std", "n", "lag_infested", "lag_infestation_sum")])
+
+# zip model
+zero_inflated_model <- glmmTMB(
+  infestation_sum ~ logdbh + lag_infestation_sum + logDISTANCE + (1 | unique_ID) + (1 | site),  
+  data = sum_model_data,  
+  family = nbinom2,  
+  zi = ~ logdbh + lag_infestation_sum + logDISTANCE + (1 | unique_ID) + (1 | site)
+)
+
+summary(zero_inflated_model)
+
+zip.sims <- simulateResiduals(zero_inflated_model)
+plot(zip.sims)
+r2(zero_inflated_model)
+
+sum_model_data$log_DISTANCE_noinfest <- log(sum_model_data$DISTANCE_noinfest)
+
+
+
+
+
+
+# Data tweaks after meetings (2/12/24)
+
+sum_model_data$season <- ifelse(sum_model_data$t == 3, 0,1)
+
+# Standardize all variables
+sum_model_data$dbh_std <- scale(sum_model_data$logdbh)
+sum_model_data$DISTANCE_std <- scale(sum_model_data$logDISTANCE)
+sum_model_data$DISTANCE_noinfest_std <- scale(sum_model_data$log_DISTANCE_noinfest)
+sum_model_data$n_std <- scale(sum_model_data$n)
+sum_model_data$perc.infested_std <- scale(sum_model_data$perc.infested)
+sum_model_data$brooms_nh_std <- scale(sum_model_data$brooms_nh)
+sum_model_data$lag_perc.infested_std <- scale(sum_model_data$lag_perc.infested)
+
+# Filter out non-infested trees
+sum_model_data <- sum_model_data %>% filter(infestation_sum != 0)
+
+# Get max infestation
+sections <- sum_model_data %>% select(c("NL", "NM", "NH", "SL", "SM", "SH"))
+sections$max_infestation <- apply(sections, 1, max, na.rm = TRUE)
+sum_model_data$max_infestation <- sections$max_infestation
+
+# Only one working
+sum_model_std <- glmmTMB(max_infestation ~ dbh_std + DISTANCE_std + perc.infested_std + mean_percent_live_crown_std + lag_perc.infested_std + gouting_recode + DISTANCE_noinfest_std + brooms_nh + season + (1|site),
+  #ziformula = ~ dbh_std + lag_perc.infested_std + DISTANCE_noinfest_std + (1|site),
+  data = sum_model_data, 
+  family = poisson(link = "log"))
+
+summary(sum_model_std)
+r2(sum_model_std)
+
+sum.sims <- simulateResiduals(sum_model_std)
+plot(sum.sims)
+
+# Add brooms - not sig
+# Brooms - nh - sig
+# Add beetle - not sig
+# avg. gouting - sig
+# gouting - sig
+# number in neighborhood - killed it
+# add basal area host - slight (.)
+# basal area all trees - not sig
+# distance to nearest non-infested above 2.54 - sig
+
+# Ordinal Regression
+library(ordinal)
+
+sum_model_data$max_infestation <- as.factor(sum_model_data$max_infestation)
+sum_ord <- clm(max_infestation ~ dbh_std + DISTANCE_std + mean_percent_live_crown_std + lag_infestation_sum_std + lag_perc.infested_std + gouting_recode + DISTANCE_noinfest_std + brooms_nh_std, data = sum_model_data)
+
+summary(sum_ord)
+
+# maximum likelihood plots
+slice.fm1 <- slice(sum_ord, lambda = 5)
+par(mfrow = c(2, 5))
+plot(slice.fm1)
+
+# same but zoomed in - looking for any deviation of dotted from solid line
+slice2.fm1 <- slice(sum_ord, lambda = 1e-5)
+plot(slice2.fm1)
+
+# check convergence
+convergence(sum_ord)
+```
+
+### Coef plot - infestation sum model
+
+```{r}
+sum.rem <- broom::tidy(sum_model_std) # Create a tidy dataframe for the model
+sum.rem <- sum.rem %>% filter(component != "zi")
+
+# Add a column to identify the model
+sum.rem$model <- "sum_model_std" 
+
+dw_sum_rem <- dwplot(sum.rem) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "perc.infested_std" = "Percent Infested (neighborhood)",
+               "lag_perc.infested" = "Lagged percent infested (neighborhood)",
+               "dist_nearest_tree" = "Distance to nearest tree",
+                "gouting_recode" = "Gouting",
+                "brooms_nh" = "Broom count (neighborhood)",
+                "mean_percent_live_crown_std" = "Mean percent live crown (neighborhood)",
+                "logdbh" = "DBH",
+                "log_DISTANCE_noinfest" = "Distance to nearest uninfested tree > 2.54cm"
+      ),
+    limits = c( "logDISTANCE",
+                "mean_percent_live_crown_std",
+                "lag_perc.infested",
+                "brooms_nh",
+                "log_DISTANCE_noinfest",
+                "logdbh",
+                "gouting_recode",
+                "perc.infested_std"
+                ) # Specify the desired order
+  )
+
+
+print(dw_sum_rem+geom_vline(xintercept=0,lty=2))
+```
+
+# Main infestation status workflow again!!
+
+```{r}
+data$mean_percent_live_crown_std <- (data$mean_percent_live_crown - mean(data$mean_percent_live_crown, na.rm = TRUE))/sd(data$mean_percent_live_crown, na.rm = TRUE)
+
+cor(data_long[, c("logdbh", "DISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new", "mean_dist_infested", "dist_nearest_tree", "basal_area_host_std", "avg.dbh", "avg.gouting", "mean_percent_live_crown", "n")])
+
+# Infestation sum and number of infested come out as 0.88 which may be close enough to just use one if considered in final model
+
+```
+
+# Building with long dataset
+
+## Infestation final - data_long
+
+- I've been building these models based on first visit and then putting in visits, why haven't I built them with the long dataset and use all observations at all times, idk! Let's do it
+
+```{r}
+
+data_long <- data_long %>% filter(`Dead / Alive` == 1)
+
+tree.re.glmm <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + beetle_recode + (1|site) + (1|unique_ID), data = data_long, family = binomial(link = "logit"))
+
+tree.re.sims <- simulateResiduals(tree.re.glmm)
+plot(tree.re.sims)
+
+summary(tree.re.glmm)
+summary(infest.final)
+
+residrecal <- recalculateResiduals(tree.re.sims, group = data_long$t)
+testTemporalAutocorrelation(residrecal, time = unique(data_long$t))
+acf(residuals(tree.re.glmm))
+```
+
+# Autocorrelation structures on long dataset
+
+```{r}
+# temporal autocorrelated structure
+data_long$t <- as.factor(data_long$t)
+data_long_no_beetle <- data_long %>% filter(beetle_recode == 0)
+
+
+tree.re.glmm.ar <- glmmTMB(cbind(infested, 1 - infested) ~ -1 + logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + 
+    ar1(0 + t | unique_ID) # autocorrelation term
+  + (1|site), data = data_long_no_beetle, family = binomial(link = "logit"))
+
+tree.re.sims.ar <- simulateResiduals(tree.re.glmm.ar)
+plot(tree.re.sims.ar)
+residrecal.ar <- recalculateResiduals(tree.re.sims.ar, group = data_long$t)
+testTemporalAutocorrelation(residrecal.ar, time = unique(data_long$t))
+acf(residuals(tree.re.glmm.ar))
+
+summary(tree.re.glmm.ar)
+
+tidy_main_long <- broom::tidy(tree.re.glmm.ar) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_main_long$model <- "Infestation - AR" 
+
+dw_main <- dwplot(tidy_main_long) +
+  scale_y_discrete(
+    labels = c("logDISTANCE" = "Distance to nearest infested",
+               "infest_sum_std_new" = "Infestation sum (neighborhood)",
+                "Gouting1" = "Gouting - 1",
+                "Gouting2" = "Gouting - 2",
+                "Gouting3" = "Gouting - 3",
+                "beetle_recode" = "Beetle - presence/absence",
+                "avg.dbh" = "Average DBH in neighborhood",
+                "avg.gouting" = "Average Gouting",
+                "logdbh" = "DBH"),
+    limits = c( "avg.dbh",
+                "avg.gouting",
+                "beetle_recode",
+                "Gouting3",
+                "Gouting2",
+                "Gouting1",
+                "infest_sum_std_new",
+                "logDISTANCE", 
+                "logdbh") # Specify the desired order
+  )
+print(dw_main+geom_vline(xintercept=0,lty=2))
+
+```
+
+# Site variograms
+
+```{r}
+
+# spatial autocorrelation structure
+
+emig_long <- data_long %>% filter(site == "EMIG")
+
+tree.re.glmm.emig <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + gouting_recode + infest_sum_std_new + avg.dbh + dist_nearest_tree + (1|unique_ID) + (1|site),
+    #beetle_recode + - rank-deficient in this model
+   data = emig_long, family = binomial(link = "logit"))
+
+residuals.emig <- residuals(tree.re.glmm.emig, type = "pearson")
+
+residual_data <- data.frame(
+  residuals = residuals.emig,
+  x = emig_long$Longitude,
+  y = emig_long$Latitude
+)
+
+gstat_obj <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data
+)
+
+# Calculate the empirical semivariogram
+semivariogram <- variogram(gstat_obj)
+
+plot(semivariogram, main = "Semivariogram of GLMM Residuals - Emigration Canyon - all visits")
+
+# Trying one visit to see difference
+
+emig_v1 <- data_long %>% filter(site == "EMIG" & t == 1)
+
+tree.re.glmm.emig.v1 <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + mean_percent_live_crown_std + n + perc.infested + (1|unique_ID),
+    #beetle_recode + - rank-deficient in this model
+   data = emig_v1, family = binomial(link = "logit"))
+
+residuals.emig.v1 <- residuals(tree.re.glmm.emig.v1, type = "pearson")
+
+residual_data.v1 <- data.frame(
+  residuals = residuals.emig.v1,
+  x = emig_v1$Longitude,
+  y = emig_v1$Latitude
+)
+
+gstat_obj.v1 <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.v1
+)
+
+# Calculate the empirical semivariogram
+semivariogram.v1 <- variogram(gstat_obj.v1)
+
+plot(semivariogram.v1, main = "Semivariogram of GLMM Residuals - Emigration Canyon - visit 1")
+
+# Testing all sites at one visit
+
+all_v1 <- data_long %>% filter(t == 1)
+
+tree.re.glmm.all.v1 <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + mean_percent_live_crown_std + n + perc.infested + (1|unique_ID),
+    #beetle_recode + - rank-deficient in this model
+   data = all_v1, family = binomial(link = "logit"))
+
+residuals.all.v1 <- residuals(tree.re.glmm.all.v1,  type = "pearson")
+
+residual_data.v1 <- data.frame(
+  residuals = residuals.all.v1,
+  x = all_v1$Longitude,
+  y = all_v1$Latitude
+)
+
+gstat_obj.v1 <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.v1
+)
+
+# Calculate the empirical semivariogram
+semivariogram.v1.all <- variogram(gstat_obj.v1)
+
+plot(semivariogram.v1.all, main = "Semivariogram of GLMM Residuals - all sites - visit 1")
+
+# Testing all sites at all visits
+
+tree.re.glmm.all <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + mean_percent_live_crown_std + n + perc.infested + (1|unique_ID),
+    #beetle_recode + - rank-deficient in this model
+   data = data_long, family = binomial(link = "logit"))
+
+residuals.all <- residuals(tree.re.glmm.all,  type = "pearson")
+
+residual_data <- data.frame(
+  residuals = residuals.all,
+  x = data_long$Longitude,
+  y = data_long$Latitude
+)
+
+gstat_obj.all <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data
+)
+
+# Calculate the empirical semivariogram
+semivariogram.all <- variogram(gstat_obj.all)
+
+plot(semivariogram.all, main = "Semivariogram of GLMM Residuals - all sites - all visits")
+
+# Franklin Basin
+
+frnk_long <- data_long %>% filter(site == "FRNK")
+
+tree.re.glmm.ar.frnk <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown_std + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = frnk_long, family = binomial(link = "logit"))
+
+residuals.frnk <- residuals(tree.re.glmm.ar.frnk)
+
+residual_data.frnk <- data.frame(
+  residuals = residuals.frnk,
+  x = frnk_long$Latitude,
+  y = frnk_long$Longitude
+)
+
+gstat_obj.frnk <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.frnk
+)
+
+# Calculate the empirical semivariogram
+semivariogram.frnk <- variogram(gstat_obj.frnk)
+
+plot(semivariogram.frnk, main = "Semivariogram of GLMM Residuals - Franklin Basin")
+
+# Monte Cristo
+
+mocr_long <- data_long %>% filter(site == "MOCR")
+
+tree.re.glmm.ar.mocr <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = mocr_long, family = binomial(link = "logit"))
+
+residuals.mocr <- residuals(tree.re.glmm.ar.mocr)
+
+residual_data.mocr <- data.frame(
+  residuals = residuals.mocr,
+  x = mocr_long$Latitude,
+  y = mocr_long$Longitude
+)
+
+gstat_obj.mocr <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.mocr
+)
+
+# Calculate the empirical semivariogram
+semivariogram.mocr <- variogram(gstat_obj.mocr)
+
+plot(semivariogram.mocr, main = "Semivariogram of GLMM Residuals - Monte Cristo")
+
+# Mount Timp
+
+mttp_long <- data_long %>% filter(site == "MTTP")
+
+tree.re.glmm.ar.mttp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = mttp_long, family = binomial(link = "logit"))
+
+residuals.mttp <- residuals(tree.re.glmm.ar.mttp)
+
+residual_data.mttp <- data.frame(
+  residuals = residuals.mttp,
+  x = mttp_long$Latitude,
+  y = mttp_long$Longitude
+)
+
+gstat_obj.mttp <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.mttp
+)
+
+# Calculate the empirical semivariogram
+semivariogram.mttp <- variogram(gstat_obj.mttp)
+
+plot(semivariogram.mttp, main = "Semivariogram of GLMM Residuals - Mount Timpanogos")
+
+# Smith and Morehouse
+
+smmh_long <- data_long %>% filter(site == "SMMH")
+
+tree.re.glmm.ar.smmh <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = smmh_long, family = binomial(link = "logit"))
+
+residuals.smmh <- residuals(tree.re.glmm.ar.smmh)
+
+residual_data.smmh <- data.frame(
+  residuals = residuals.smmh,
+  x = smmh_long$Latitude,
+  y = smmh_long$Longitude
+)
+
+gstat_obj.smmh <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.smmh
+)
+
+# Calculate the empirical semivariogram
+semivariogram.smmh <- variogram(gstat_obj.smmh)
+
+plot(semivariogram.smmh, main = "Semivariogram of GLMM Residuals - Smith and Morehouse")
+
+# Soapstone
+
+soap_long <- data_long %>% filter(site == "SOAP")
+
+tree.re.glmm.ar.soap <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = soap_long, family = binomial(link = "logit"))
+
+residuals.soap <- residuals(tree.re.glmm.ar.soap)
+
+residual_data.soap <- data.frame(
+  residuals = residuals.soap,
+  x = soap_long$Latitude,
+  y = soap_long$Longitude
+)
+
+gstat_obj.soap <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.soap
+)
+
+# Calculate the empirical semivariogram
+semivariogram.soap <- variogram(gstat_obj.soap)
+
+# Templr Fork
+
+tmpf_long <- data_long %>% filter(site == "TMPF")
+
+tree.re.glmm.ar.tmpf <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = tmpf_long, family = binomial(link = "logit"))
+
+residuals.tmpf <- residuals(tree.re.glmm.ar.tmpf)
+
+residual_data.tmpf <- data.frame(
+  residuals = residuals.tmpf,
+  x = tmpf_long$Latitude,
+  y = tmpf_long$Longitude
+)
+
+gstat_obj.tmpf <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.tmpf
+)
+
+# Calculate the empirical semivariogram
+semivariogram.tmpf <- variogram(gstat_obj.tmpf)
+
+# Cox Springs
+
+cxsp_long <- data_long %>% filter(site == "CXSP")
+
+tree.re.glmm.ar.cxsp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + avg.dbh + Gouting + infest_sum_std_new + avg.gouting + mean_percent_live_crown + 
+    beetle_recode +
+    ar1(0 + t | unique_ID), # autocorrelation term
+   data = cxsp_long, family = binomial(link = "logit"))
+
+residuals.cxsp <- residuals(tree.re.glmm.ar.cxsp)
+
+residual_data.cxsp <- data.frame(
+  residuals = residuals.cxsp,
+  x = cxsp_long$Latitude,
+  y = cxsp_long$Longitude
+)
+
+gstat_obj.cxsp <- gstat(
+  id = "residuals",
+  formula = residuals ~ 1,
+  locations = ~x + y,
+  data = residual_data.cxsp
+)
+
+# Calculate the empirical semivariogram
+semivariogram.cxsp <- variogram(gstat_obj.cxsp)
+
+
+plot(semivariogram.cxsp, main = "Semivariogram of GLMM Residuals - Cox Springs")
+plot(semivariogram.tmpf, main = "Semivariogram of GLMM Residuals - Temple Fork")
+plot(semivariogram.smmh, main = "Semivariogram of GLMM Residuals - Smith and Morehouse")
+plot(semivariogram.soap, main = "Semivariogram of GLMM Residuals - Soapstone Basin")
+plot(semivariogram.mttp, main = "Semivariogram of GLMM Residuals - Mount Timpanogos")
+plot(semivariogram.mocr, main = "Semivariogram of GLMM Residuals - Monte Cristo")
+plot(semivariogram.frnk, main = "Semivariogram of GLMM Residuals - Franklin Basin")
+plot(semivariogram, main = "Semivariogram of GLMM Residuals - Emigration Canyon")
+
+summary(tree.re.glmm.ar.cxsp)
+summary(tree.re.glmm.ar.emig)
+summary(tree.re.glmm.ar.frnk)
+summary(tree.re.glmm.ar.mttp)
+summary(tree.re.glmm.ar.mocr)
+summary(tree.re.glmm.ar.smmh)
+summary(tree.re.glmm.ar.soap)
+summary(tree.re.glmm.ar.tmpf)
+
+# FRNK and MTTPare showinf NANs, let's investigate
+# appears something wrong with avg.dbh
+
+cor(frnk_long[, c("logDISTANCE", "logdbh", "brooms_nh", "infest_sum_std_new", "avg.dbh", "avg.gouting", "mean_percent_live_crown_std")])
+
+step_model.cxsp <- step(tree.re.glmm.ar.cxsp, direction = "both", trace = TRUE)
+step_model.emig <- step(tree.re.glmm.ar.emig, direction = "both", trace = TRUE)
+step_model.frnk <- step(tree.re.glmm.ar.frnk, direction = "both", trace = TRUE)
+step_model.mocr <- step(tree.re.glmm.ar.mocr, direction = "both", trace = TRUE)
+step_model.mttp <- step(tree.re.glmm.ar.mttp, direction = "both", trace = TRUE)
+step_model.smmh <- step(tree.re.glmm.ar.smmh, direction = "both", trace = TRUE)
+step_model.soap <- step(tree.re.glmm.ar.soap, direction = "both", trace = TRUE)
+step_model.tmpf <- step(tree.re.glmm.ar.tmpf, direction = "both", trace = TRUE)
+
+summary(step_model.cxsp)
+summary(step_model.tmpf)
+summary(step_model.smmh)
+summary(step_model.soap)
+summary(step_model.mttp)
+summary(step_model.mocr)
+summary(step_model.emig)
+summary(step_model.frnk)
+```
+
+## Infestation - clump
+
+```{r}
+clump_long <- filter(data_long, dbh == 1.27)
+
+cor(clump_long[, c("logheight", "DISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "avg.dbh", "avg.gouting", "mean_percent_live_crown", "n")])
+
+## Building model below
+
+ clump.base <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.base.sims <- simulateResiduals(clump.base)
+plot(clump.base.sims)
+
+summary(clump.base)
+
+# Add brooms
+
+clump.broom <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.broom.sims <- simulateResiduals(clump.broom)
+plot(clump.broom.sims)
+
+summary(clump.broom)
+
+clump.broom.nh <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + brooms_nh + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.broom.sims <- simulateResiduals(clump.broom.nh)
+plot(clump.broom.sims)
+
+summary(clump.broom.nh)
+
+# Add beetle
+
+clump.beetle <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + beetle_recode + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.beetle.sims <- simulateResiduals(clump.beetle)
+plot(clump.beetle.sims)
+
+summary(clump.beetle)
+
+# Add infest sum
+
+clump.sum <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + infest_sum_std_new + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.sum.sims <- simulateResiduals(clump.sum)
+plot(clump.sum.sims)
+
+summary(clump.sum)
+
+# percent infested
+
+clump.pinfest <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + infest_sum_std_new + perc.infested + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.pinfest.sims <- simulateResiduals(clump.pinfest)
+plot(clump.pinfest.sims)
+
+summary(clump.pinfest)
+
+# distance to nearest tree
+
+clump.dist.nearinfest <- glmmTMB(cbind(infested, 1 - infested) ~ Gouting + infest_sum_std_new + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.dist.nearinfest.sims <- simulateResiduals(clump.dist.nearinfest)
+plot(clump.dist.nearinfest.sims)
+
+summary(clump.dist.nearinfest)
+
+# avg. dbh in neighborhood
+
+clump.dbh.infest <- glmmTMB(cbind(infested, 1 - infested) ~ Gouting + infest_sum_std_new + avg.dbh + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.dbh.infest.sims <- simulateResiduals(clump.dbh.infest)
+plot(clump.dbh.infest.sims)
+
+summary(clump.dbh.infest)
+
+# Building model above
+clump.final.long <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + brooms_recode + (1|unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.final.sims <- simulateResiduals(clump.final.long)
+plot(clump.final.sims)
+
+summary(clump.final.long)
+
+testZeroInflation(clump.final.sims)
+
+```
+
+## Infestation - large
+
+```{r}
+large_long <- filter(data_long, dbh != 1.27)
+
+cor(large_long[, c("logheight", "DISTANCE", "brooms_recode", "brooms_nh", "beetle_recode", "infest_sum_std_new", "dist_nearest_tree", "basal_area_host_std", "avg.dbh", "avg.gouting", "mean_percent_live_crown", "n")])
+
+## Building model below
+
+ large.base <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.base.sims <- simulateResiduals(large.base)
+plot(large.base.sims)
+
+summary(large.base)
+
+# Add brooms
+
+large.broom <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.broom.sims <- simulateResiduals(large.broom)
+plot(large.broom.sims)
+
+summary(large.broom)
+
+large.broom.nh <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + brooms_nh + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.broom.sims <- simulateResiduals(large.broom.nh)
+plot(large.broom.sims)
+
+summary(large.broom.nh)
+
+# Add beetle
+
+large.beetle <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + beetle_recode + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.beetle.sims <- simulateResiduals(large.beetle)
+plot(large.beetle.sims)
+
+summary(large.beetle)
+
+# Add infest sum
+
+large.sum <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + infest_sum_std_new + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.sum.sims <- simulateResiduals(large.sum)
+plot(large.sum.sims)
+
+summary(large.sum)
+
+# distance to nearest tree
+
+large.dist.nearinfest <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.dist.nearinfest.sims <- simulateResiduals(large.dist.nearinfest)
+plot(large.dist.nearinfest.sims)
+
+summary(large.dist.nearinfest)
+
+# avg. dbh in neighborhood
+
+large.dbh.infest <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.dbh.infest.sims <- simulateResiduals(large.dbh.infest)
+plot(large.dbh.infest.sims)
+
+summary(large.dbh.infest)
+
+# Building model above
+large.final.long <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + logdbh + Gouting + infest_sum_std_new + avg.dbh + dist_nearest_tree + (1|unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.final.sims <- simulateResiduals(large.final.long)
+plot(large.final.sims)
+
+summary(large.final.long)
+
+testZeroInflation(large.final.sims)
+
+```
+
+# Long data infestation status beta coefficient plot
+
+```{r}
+tidy_large_long <- broom::tidy(large.final.long) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_large_long$model <- "large.long" 
+
+dw_large_long <- dwplot(tidy_large_long)
+
+tidy_small_long <- broom::tidy(clump.final.long)
+
+tidy_small_long$model <- "clump.long"
+
+dw_small_long <- dwplot(tidy_small_long)
+
+tidy_all_long <- rbind(tidy_large_long, tidy_small_long)
+
+dw_all_long <- dwplot(tidy_all_long) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "infest_sum_std_new" = "Infestation sum (neighborhood)",
+               "dist_nearest_tree" = "Distance to nearest tree",
+                "Gouting1" = "Gouting - 1",
+                "Gouting2" = "Gouting - 2",
+                "Gouting3" = "Gouting - 3",
+                "brooms_recode" = "Brooms - presence/absence",
+                "avg.dbh" = "Average dbh in neighborhood" ,
+                "logdbh" = "DBH"
+      ),
+    limits = c("dist_nearest_tree",
+               "avg.dbh",
+                "Gouting3",
+                "Gouting2",
+                "Gouting1",
+                "logdbh",
+                "infest_sum_std_new",
+                "brooms_recode",
+                "logDISTANCE"
+                ) # Specify the desired order
+  )
+
+
+print(dw_all_long+geom_vline(xintercept=0,lty=2))
+   
+```
+
+# Large infestation - AR Structure
+
+```{r}
+## Building model below
+
+large_long$t <- as.factor(large_long$t)
+
+ large.base <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.base.sims <- simulateResiduals(large.base)
+plot(large.base.sims)
+
+summary(large.base)
+
+# Add brooms
+
+large.broom <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + brooms_recode + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.broom.sims <- simulateResiduals(large.broom)
+plot(large.broom.sims)
+
+summary(large.broom)
+
+large.broom.nh <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + brooms_nh + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.broom.sims <- simulateResiduals(large.broom.nh)
+plot(large.broom.sims)
+
+summary(large.broom.nh)
+
+# Add beetle
+
+large.beetle.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + brooms_recode + beetle_recode + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.beetle.sims.ar <- simulateResiduals(large.beetle.ar)
+plot(large.beetle.sims.ar)
+
+summary(large.beetle.ar)
+
+# Add infest sum
+
+large.sum.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.sum.sims.ar <- simulateResiduals(large.sum.ar)
+plot(large.sum.sims.ar)
+
+summary(large.sum.ar)
+
+# distance to nearest tree
+
+large.dist.near.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + dist_nearest_tree + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.dist.near.sims.ar <- simulateResiduals(large.dist.near.ar)
+plot(large.dist.near.sims.ar)
+
+summary(large.dist.near.ar)
+
+# avg. dbh in neighborhood
+
+large.dbh.infest.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + dist_nearest_tree + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.dbh.infest.sims.ar <- simulateResiduals(large.dbh.infest.ar)
+plot(large.dbh.infest.sims.ar)
+
+summary(large.dbh.infest.ar)
+
+# Building model above
+large.final.long.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + logdbh + Gouting + infest_sum_std_new + avg.dbh + dist_nearest_tree + ar1(0 + t | unique_ID) + (1|site), data = large_long, family = binomial(link = "logit"))
+
+large.final.sims.ar <- simulateResiduals(large.final.long.ar)
+plot(large.final.sims.ar)
+
+summary(large.final.long.ar)
+
+tidy_large_long.ar <- broom::tidy(large.final.long.ar) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_large_long.ar$model <- "large.long.ar" 
+
+dw_large_ar <- dwplot(tidy_large_long.ar) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "infest_sum_std_new" = "Infestation sum (neighborhood)",
+               "dist_nearest_tree" = "Distance to nearest tree",
+                "Gouting1" = "Gouting - 1",
+                "Gouting2" = "Gouting - 2",
+                "Gouting3" = "Gouting - 3",
+                "avg.dbh" = "Average dbh in neighborhood" ,
+                "logdbh" = "DBH"
+      ),
+    limits = c("dist_nearest_tree",
+               "avg.dbh",
+                "Gouting3",
+                "Gouting2",
+                "Gouting1",
+                "logdbh",
+                "infest_sum_std_new",
+                "logDISTANCE"
+                ) # Specify the desired order
+  )
+
+
+print(dw_large_ar+geom_vline(xintercept=0,lty=2))
+```
+
+# Clump infestation status - AR structure
+
+```{r}
+## Building model below
+
+clump_long$t <- as.factor(clump_long$t)
+
+ clump.base <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.base.sims <- simulateResiduals(clump.base)
+plot(clump.base.sims)
+
+summary(clump.base)
+
+# Add brooms
+
+clump.broom <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.broom.sims <- simulateResiduals(clump.broom)
+plot(clump.broom.sims)
+
+summary(clump.broom)
+
+clump.broom.nh <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + brooms_nh + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.broom.sims <- simulateResiduals(clump.broom.nh)
+plot(clump.broom.sims)
+
+summary(clump.broom.nh)
+
+# Add beetle
+
+clump.beetle.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + brooms_recode + beetle_recode + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.beetle.sims.ar <- simulateResiduals(clump.beetle.ar)
+plot(clump.beetle.sims.ar)
+
+summary(clump.beetle.ar)
+
+# Add infest sum
+
+clump.sum.ar <- glmmTMB(cbind(infested, 1 - infested) ~logdbh + logDISTANCE + Gouting + infest_sum_std_new + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.sum.sims.ar <- simulateResiduals(clump.sum.ar)
+plot(clump.sum.sims.ar)
+
+summary(clump.sum.ar)
+
+# distance to nearest tree
+
+clump.dist.near.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + dist_nearest_tree + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.dist.near.sims.ar <- simulateResiduals(clump.dist.near.ar)
+plot(clump.dist.near.sims.ar)
+
+summary(clump.dist.near.ar)
+
+# avg. dbh in neighborhood
+
+clump.dbh.infest.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + dist_nearest_tree + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.dbh.infest.sims.ar <- simulateResiduals(clump.dbh.infest.ar)
+plot(clump.dbh.infest.sims.ar)
+
+summary(clump.dbh.infest.ar)
+
+# Building model above
+clump.final.long.ar <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + Gouting + infest_sum_std_new + avg.dbh + dist_nearest_tree + ar1(0 + t | unique_ID) + (1|site), data = clump_long, family = binomial(link = "logit"))
+
+clump.final.sims.ar <- simulateResiduals(clump.final.long.ar)
+plot(clump.final.sims.ar)
+
+summary(clump.final.long.ar)
+```
+
+
+# Infestation Sum - AR structure
+
+```{r}
+sum.base.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.base.sims.ar <- simulateResiduals(sum.base.ar)
+plot(sum.base.sims.ar)
+
+summary(sum.base.ar)
+
+# Add gouting
+
+sum.gout.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.gout.sims.ar <- simulateResiduals(sum.gout.ar)
+plot(sum.gout.sims.ar)
+
+summary(sum.gout.ar)
+
+# Add brooms
+
+sum.broom.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + brooms_recode + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2)
+
+sum.broom.sims.ar <- simulateResiduals(sum.broom.ar)
+plot(sum.broom.sims.ar)
+
+summary(sum.broom.ar)
+
+# Brooms - nh
+
+sum.broom.nh.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + brooms_nh + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2(link = "log"))
+
+sum.broom.sims.ar <- simulateResiduals(sum.broom.nh.ar)
+plot(sum.broom.sims.ar)
+
+summary(sum.broom.nh.ar)
+
+# gout - nbinom1 - still performing bad, maybe worse
+
+sum.gout.ar.1 <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + logheight + Gouting + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom1(link = "log"))
+
+sum.gout.sims.ar.1 <- simulateResiduals(sum.gout.ar.1)
+plot(sum.gout.sims.ar.1)
+
+summary(sum.gout.ar.1)
+
+# Add beetle
+
+sum.beetle.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + beetle_recode + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2(link = "log"))
+
+sum.beetle.sims.ar <- simulateResiduals(sum.beetle.ar)
+plot(sum.beetle.sims.ar)
+
+summary(sum.beetle.ar)
+
+# Add infest sum
+
+sum.sum.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2(link = "log"))
+
+sum.sum.sims.ar <- simulateResiduals(sum.sum.ar)
+plot(sum.sum.sims.ar)
+
+summary(sum.sum.ar)
+
+# number in neighborhood
+
+sum.n.nhinfest.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + n + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2(link = "log"))
+
+sum.n.nhinfest.sims.ar <- simulateResiduals(sum.n.nhinfest.ar)
+plot(sum.n.nhinfest.sims.ar)
+
+summary(sum.n.nhinfest.ar)
+
+# add basal area host
+
+sum.ba_host.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + n + basal_area_host_std + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2(link = "log"))
+
+sum.ba_host.sims.ar <- simulateResiduals(sum.ba_host.ar)
+plot(sum.ba_host.sims.ar)
+
+summary(sum.ba_host.ar)
+
+# Average DBH
+
+sum.avg.dbh.ar <- glmmTMB(infestation_sum ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + n + avg.dbh + ar1(0 + t | unique_ID) + (1|site), data = data_long, family = nbinom2(link = "log"))
+
+sum.avg.dbh.sims.ar <- simulateResiduals(sum.avg.dbh.ar)
+plot(sum.avg.dbh.sims.ar)
+
+summary(sum.avg.dbh.ar)
+
+# distance to nearest tree
+sum.dist.ar <- glmmTMB(infestation_sum ~ infest_sum_std_new + dist_nearest_tree + Gouting + logDISTANCE + logdbh + n + avg.dbh + (1|site) + ar1(0 + t | unique_ID), data = data_long, family = nbinom2(link = "log"))
+
+sum.dist.sims.ar <- simulateResiduals(sum.dist.ar)
+plot(sum.dist.sims.ar)
+
+summary(sum.dist.ar)
+
+# Final
+
+sum.final.ar <- glmmTMB(infestation_sum ~ infest_sum_std_new + dist_nearest_tree + Gouting + logDISTANCE + logdbh + avg.dbh + (1|site) + ar1(0 + t | unique_ID), data = data_long, family = nbinom2(link = "log"))
+
+sum.final.sims.ar <- simulateResiduals(sum.final.ar)
+plot(sum.final.sims.ar)
+
+summary(sum.final.ar)
+```
+
+# New infestation - AR structure
+
+```{r}
+
+## Building model below
+
+new_long$t <- as.factor(new_long$t)
+
+# Start a-modelling
+
+new.base.ar <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.base.sims.ar <- simulateResiduals(new.base.ar)
+plot(new.base.sims.ar)
+
+summary(new.base.ar)
+
+# Add gouting
+
+new.gout <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.gout.sims <- simulateResiduals(new.gout)
+plot(new.gout.sims)
+
+summary(new.gout)
+
+# Add brooms
+
+new.broom <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + brooms_recode + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.broom.sims <- simulateResiduals(new.broom)
+plot(new.broom.sims)
+
+summary(new.broom)
+
+# Brooms - nh
+new.broom.nh <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + brooms_nh + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.broom.sims <- simulateResiduals(new.broom.nh)
+plot(new.broom.sims)
+
+summary(new.broom.nh)
+
+
+# Add beetle
+
+new.beetle <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + brooms_nh + beetle_recode + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.beetle.sims <- simulateResiduals(new.beetle)
+plot(new.beetle.sims)
+
+summary(new.beetle)
+
+# Add infest sum
+
+new.sum.ar <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode + infest_sum_std_new + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.sum.sims.ar <- simulateResiduals(new.sum.ar)
+plot(new.sum.sims.ar)
+
+summary(new.sum.ar)
+
+# percent infested
+
+new.pinfest.ar <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + perc.infested + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.pinfest.sims.ar <- simulateResiduals(new.pinfest.ar)
+plot(new.pinfest.sims.ar)
+
+summary(new.pinfest.ar)
+
+# number in neighborhood
+
+new.n.nhinfest.ar <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + infest_sum_std_new + perc.infested + n + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.n.nhinfest.sims.ar <- simulateResiduals(new.n.nhinfest.ar)
+plot(new.n.nhinfest.sims.ar)
+
+summary(new.n.nhinfest.ar)
+
+# add basal area host
+
+new.ba_host.ar <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting  + infest_sum_std_new + perc.infested + n + basal_area_host_std + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+
+new.ba_host.sims.ar <- simulateResiduals(new.ba_host.ar)
+plot(new.ba_host.sims.ar)
+
+summary(new.ba_host.ar)
+
+# Final Model!
+
+new.final.ar <- glmmTMB(cbind(new_infestation, 1 - new_infestation) ~ logdbh + logDISTANCE + Gouting + beetle_recode + infest_sum_std_new + avg.dbh + ar1(0 + t | unique_ID) + (1|site), data = new_long, family = binomial(link = "logit"))
+ 
+new.final.sims.ar <- simulateResiduals(new.final.ar)
+plot(new.final.sims.ar)
+ 
+summary(new.final.ar)
+```
+
+
+# Full-factorial for neighborhood effect
+
+So in our final infestation model, we have average dbh and infestation sum that come out as significantly impacting probability of infestation. What we want to do is see how different distances affect this probability. We'll make a dataframe with all the combinations of average dbh and infest sum over a multidude of distances and then run those combinations in the model we've built. What we'll get is an idea of how these neighborhoods interact with each other and try to get the best model out of it.
+
+```{r}
+
+# Create a list of all data frames
+local_list <- list(
+  local_1, local_2, local_4, local_6, local_8, local_10,
+  local_12, local_14, local_16, local_18, local_20
+)
+
+# Make template
+template <- Reduce(function(x, y) merge(x, y, all = TRUE), lapply(local_list, function(df) df["unique_ID"]))
+
+# align data
+aligned_local_list <- lapply(local_list, function(df) merge(template, df, by = "unique_ID", all.x = TRUE))
+
+# Keep as separate data frames
+names(aligned_local_list) <- c("local_1", "local_2", "local_4", "local_6", "local_8", 
+                               "local_10", "local_12", "local_14", "local_16", "local_18", "local_20")
+
+# New local data - same lengths
+
+local_data_20_new <- data %>% inner_join(aligned_local_list$local_20, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+
+ local_data_18_new <- data %>% inner_join(aligned_local_list$local_18, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_16_new <- data %>% inner_join(aligned_local_list$local_16, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_14_new <- data %>% inner_join(aligned_local_list$local_14, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_12_new <- data %>% inner_join(aligned_local_list$local_12, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_10_new <- data %>% inner_join(aligned_local_list$local_10, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+local_data_8_new <- data %>% inner_join(aligned_local_list$local_8,by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_6_new <- data %>% inner_join(aligned_local_list$local_6, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_4_new <- data %>% inner_join(aligned_local_list$local_4, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_2_new <- data %>% inner_join(aligned_local_list$local_2, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+ local_data_1_new <- data %>% inner_join(aligned_local_list$local_1, by = "unique_ID") %>% filter(species == "ABLA" | species == "ABCO")
+
+# List of avg.dbh vectors
+avg.dbh <- data.frame(
+  avg.dbh_1 = local_data_1_new$avg.dbh.y,
+  avg.dbh_2 = local_data_2_new$avg.dbh.y,
+  avg.dbh_4 = local_data_4_new$avg.dbh.y,
+  avg.dbh_6 = local_data_6_new$avg.dbh.y,
+  avg.dbh_8 = local_data_8_new$avg.dbh.y,
+  avg.dbh_10 = local_data_10_new$avg.dbh.y,
+  avg.dbh_12 = local_data_12_new$avg.dbh.y,
+  avg.dbh_14 = local_data_14_new$avg.dbh.y,
+  avg.dbh_16 = local_data_16_new$avg.dbh.y,
+  avg.dbh_18 = local_data_18_new$avg.dbh.y,
+  avg.dbh_20 = local_data_20_new$avg.dbh.y
+)
+
+# same for infest sum
+infest_sum_std_new_v1 <- data.frame(
+  infest_sum_std_new_v1_1 = local_data_1_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_2 = local_data_2_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_4 = local_data_4_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_6 = local_data_6_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_8 = local_data_8_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_10 = local_data_10_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_12 = local_data_12_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_14 = local_data_14_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_16 = local_data_16_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_18 = local_data_18_new$infest_sum_std_new_v1,
+  infest_sum_std_new_v1_20 = local_data_20_new$infest_sum_std_new_v1
+)
+
+  
+combinations <- expand.grid(var1 = infest_sum_std_new_v1, var2 = avg.dbh)
+
+```
+
+
+
+## Building infestation status model with weights
+
+```{r}
+# # update neighborhood metrics with spatial weights
+# model_data <- sm_with_proportions
+# model_data$infest_sum_std_new <- model_data$infest_sum_std_new * model_data$proportion
+# model_data$avg.dbh <- model_data$avg.dbh * model_data$proportion
+# model_data$mean_percent_live_crown_std <- model_data$mean_percent_live_crown_std * model_data$proportion
+# model_data$brooms_nh <- model_data$brooms_nh * model_data$proportion
+# model_data$perc.infested <- model_data$perc.infested * model_data$proportion
+# model_data$basal_area_host_std <- model_data$basal_area_host_std * model_data$proportion
+# model_data$mean_dist_infested_recode <- model_data$mean_dist_infested_recode * model_data$proportion
+# model_data$n <- model_data$n * model_data$proportion
+# 
+# # Filter live
+# model_data$`Dead / Alive`[is.na(model_data$`Dead / Alive`)] <- 0
+# model_data <- filter(model_data, model_data$`Dead / Alive` == 1)
+
+cor(model_data[, c("logDISTANCE", "lag_logDISTANCE", "infest_sum_std_new","lag_infested", "lag_perc.infested",  "lag_infest_sum_std_new", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "avg.dbh", "gouting_recode", "avg.gouting", "mean_percent_live_crown", "n", "comp_index")])
+
+# Scale coordinates
+model_data$x_scaled <- scale(model_data$Longitude)  
+model_data$y_scaled <- scale(model_data$Latitude)  
+model_data$spatial <- paste0(model_data$x_scaled, "_", model_data$y_scaled)
+
+# Build model
+
+# Standardize variables
+model_data$logdbh_std <- scale(model_data$logdbh)
+model_data$logDISTANCE_std <- scale(model_data$logDISTANCE)
+model_data$log_DISTANCE_noinfest_std <- scale(model_data$log_DISTANCE_noinfest)
+model_data$lag_infested_std <- scale(model_data$lag_infested)
+model_data$n_std <- scale(model_data$n)
+model_data$perc.infested_std <- scale(model_data$perc.infested)
+
+prop.base <- glmmTMB(
+  cbind(infested, 1 - infested) ~ 1 + exp(logdbh + logDISTANCE + gouting_recode + 1|unique_ID + 0|site),
+  data = model_data,
+  family = binomial(link = "logit")
+)
+
+prop.base.sims <- simulateResiduals(prop.base)
+plot(prop.base.sims)
+
+summary(prop.base)
+
+# Add brooms
+
+prop.broom.nh <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_nh + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.broom.sims <- simulateResiduals(prop.broom.nh)
+plot(prop.broom.sims)
+
+summary(prop.broom.nh)
+
+# Add beetle
+
+prop.beetle <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.beetle.sims <- simulateResiduals(prop.beetle)
+plot(prop.beetle.sims)
+
+summary(prop.beetle)
+
+# Add infest sum
+
+prop.sum <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + infest_sum_std_new + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.sum.sims <- simulateResiduals(prop.sum)
+plot(prop.sum.sims)
+
+summary(prop.sum)
+
+# distance to nearest tree
+
+prop.dist.nearinfest <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + infest_sum_std_new + dist_nearest_tree + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.dist.nearinfest.sims <- simulateResiduals(prop.dist.nearinfest)
+plot(prop.dist.nearinfest.sims)
+
+summary(prop.dist.nearinfest)
+
+# avg. dbh in neighborhood
+
+prop.dbh.infest <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + infest_sum_std_new + avg.dbh + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.dbh.infest.sims <- simulateResiduals(prop.dbh.infest)
+plot(prop.dbh.infest.sims)
+
+summary(prop.dbh.infest)
+
+# lag infestation status
+
+prop.lag.infest <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + infest_sum_std_new + + dist_nearest_tree + lag_infested + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.lag.infest.sims <- simulateResiduals(prop.lag.infest)
+plot(prop.lag.infest.sims)
+
+summary(prop.lag.infest)
+
+# mean percent live crown
+
+prop.crown.infest <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + infest_sum_std_new + + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.crown.infest.sims <- simulateResiduals(prop.crown.infest)
+plot(prop.crown.infest.sims)
+
+summary(prop.crown.infest)
+
+# N
+
+prop.n <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + infest_sum_std_new + + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.n.sims <- simulateResiduals(prop.n)
+plot(prop.n.sims)
+
+summary(prop.n)
+
+# percent infested
+
+prop.perc <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + perc.infested + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.perc.sims <- simulateResiduals(prop.perc)
+plot(prop.perc.sims)
+
+summary(prop.perc)
+
+testSpatialAutocorrelation(prop.perc, x = model_data$Longitude, y = model_data$Latitude)
+
+# avg gouting
+
+prop.gouting <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + perc.infested + avg.gouting + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.gouting.sims <- simulateResiduals(prop.gouting)
+plot(prop.gouting.sims)
+
+summary(prop.gouting)
+
+# Basal area host
+
+prop.ba <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + perc.infested + basal_area_host_std + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.ba.sims <- simulateResiduals(prop.ba)
+plot(prop.ba.sims)
+
+summary(prop.ba)
+
+# basal area all trees in neighborhood
+
+prop.ba.all <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + perc.infested + basal_area_nh_std + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.ba.all.sims <- simulateResiduals(prop.ba.all)
+plot(prop.ba.all.sims)
+
+summary(prop.ba.all)
+
+# distance to nearest non-infested and non-clump (replacing nearest tree variable)
+
+prop.dist <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + log_DISTANCE_noinfest + lag_infested + mean_percent_live_crown_std + n + perc.infested + (1|unique_ID) + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.dist.sims <- simulateResiduals(prop.dist)
+plot(prop.dist.sims)
+
+summary(prop.dist)
+
+# Building model above
+prop.final.long <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + log_DISTANCE_noinfest + lag_infested + mean_percent_live_crown_std + n + perc.infested + comp_index + (1|site), data = model_data, family = binomial(link = "logit"))
+
+prop.final.sims <- simulateResiduals(prop.final.long)
+plot(prop.final.sims)
+
+summary(prop.final.long)
+r2(prop.final.long)
+check_singularity(prop.final.long)
+
+testZeroInflation(prop.final.sims)
+
+r2(prop.final.long)
+
+prop.final.infest <- broom::tidy(prop.final.long) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+prop.final.infest$model <- "prop.final.infest" 
+
+dw_prop_final <- dwplot(prop.final.infest) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "perc.infested" = "Percent Infested (neighborhood)",
+               "log_DISTANCE_noinfest" = "Distance to nearest non-infested tree > 2.54cm",
+                "gouting_recode" = "Gouting",
+                "lag_infested" = "Lagged infestation status",
+                "mean_percent_live_crown_std" = "Mean percent live crown (neighborhood)",
+                "n" = "Number of trees (neighborhood)" ,
+                "logdbh" = "DBH"
+      ),
+    limits = c( "logDISTANCE",
+                "mean_percent_live_crown_std",
+                "n",
+                "perc.infested",
+                "log_DISTANCE_noinfest",
+                "gouting_recode",
+                "logdbh",
+                "lag_infested"
+                ) # Specify the desired order
+  )
+
+
+print(dw_prop_final+geom_vline(xintercept=0,lty=2))
+
+```
+### Bootstrapping on final status model
+
+```{r}
+detach("package:boot", unload = TRUE)
+library(boot)
+
+model_data <- as.data.frame(model_data)
+
+boot_fn <- function(data, indices) {
+  model_data <- data[indices, ]
+  model <- glmmTMB(
+   cbind(infested, 1 - infested) ~ logdbh_std + logDISTANCE_std + gouting_recode + log_DISTANCE_noinfest_std + lag_infested + mean_percent_live_crown_std + n_std + perc.infested_std + (1|site), data = model_data, family = binomial(link = "logit")
+  )
+  return(fixef(model)$cond)  # Extract fixed effects
+}
+
+# bootstrap
+
+boot_results <- boot(model_data, boot_fn, R = 1000)
+
+# Get coefficient variability
+boot.ci(boot_results, type = "perc")
+
+
+# Alternatively, manually define:
+ coef_names <- c("Intercept", "logdbh_std", "logDISTANCE_std", "gouting_recode", "log_DISTANCE_noinfest_std", "lag_infested", "mean_percent_live_crown_std", "n_std", "perc.infested_std")
+
+boot_ci_df <- data.frame(
+  term = coef_names,
+  estimate = colMeans(boot_results$t),  # Mean estimate
+  lower = apply(boot_results$t, 2, quantile, probs = 0.025),  # 2.5% CI
+  upper = apply(boot_results$t, 2, quantile, probs = 0.975)   # 97.5% CI
+)
+
+print(boot_ci_df)
+
+ggplot(boot_ci_df, aes(x = reorder(term, estimate), y = estimate)) +
+  geom_point(color = "red", size = 3) +  # Mean estimate
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "blue") +  # CI bars
+  coord_flip() +  # Flip for better readability
+  labs(title = "Bootstrap Confidence Intervals for Model Coefficients",
+       x = "Predictor Variables", y = "Coefficient Estimate") +
+  theme_minimal()
+```
+
+
+## Building Large and Small with spatial weights
+###Small
+
+```{r}
+clump_sp <- filter(model_data, dbh == 1.27)
+
+cor(clump_sp[, c("logDISTANCE", "lag_infested", "dist_nearest_tree", "basal_area_host_std", "perc.infested", "avg.dbh", "avg.gouting", "mean_percent_live_crown", "n")])
+
+## Building model below
+
+ clump.base.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.base.sims.sp <- simulateResiduals(clump.base.sp)
+plot(clump.base.sims.sp)
+
+summary(clump.base.sp)
+
+# Add brooms
+
+clump.broom.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + brooms_recode + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.broom.sims.sp <- simulateResiduals(clump.broom.sp)
+plot(clump.broom.sims.sp)
+
+summary(clump.broom.sp)
+
+clump.broom.nh.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + brooms_recode + brooms_nh + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.broom.sims.sp <- simulateResiduals(clump.broom.nh.sp)
+plot(clump.broom.sims.sp)
+
+summary(clump.broom.nh.sp)
+
+# Add beetle
+
+clump.beetle.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + brooms_recode + beetle_recode + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.beetle.sims.sp <- simulateResiduals(clump.beetle.sp)
+plot(clump.beetle.sims.sp)
+
+summary(clump.beetle.sp)
+
+# Add perc. infested
+
+clump.sum.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + brooms_recode + perc.infested + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.sum.sims.sp <- simulateResiduals(clump.sum.sp)
+plot(clump.sum.sims.sp)
+
+summary(clump.sum.sp)
+
+# distance to nearest tree
+
+clump.dist.nearinfest.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + perc.infested + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.dist.nearinfest.sims.sp <- simulateResiduals(clump.dist.nearinfest.sp)
+plot(clump.dist.nearinfest.sims.sp)
+
+summary(clump.dist.nearinfest.sp)
+
+# avg. dbh in neighborhood
+
+clump.dbh.infest.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + perc.infested + avg.dbh + brooms_recode + dist_nearest_tree + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.dbh.infest.sims.sp <- simulateResiduals(clump.dbh.infest.sp)
+plot(clump.dbh.infest.sims.sp)
+
+summary(clump.dbh.infest.sp)
+
+# mean percent live crown
+
+clump.crown.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + perc.infested + mean_percent_live_crown + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.crown.sims.sp <- simulateResiduals(clump.crown.sp)
+plot(clump.crown.sims.sp)
+
+summary(clump.crown.sp)
+
+# lag infested status
+
+clump.lag.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + perc.infested + lag_infested + mean_percent_live_crown + avg.dbh + dist_nearest_tree + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.lag.sims.sp <- simulateResiduals(clump.lag.sp)
+plot(clump.lag.sims.sp)
+
+summary(clump.lag.sp)
+
+# n
+
+clump.n.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + perc.infested + lag_infested + dist_nearest_tree + n + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.n.sims.sp <- simulateResiduals(clump.n.sp)
+plot(clump.n.sims.sp)
+
+summary(clump.n.sp)
+
+# Building model above
+clump.final.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logDISTANCE + gouting_recode + perc.infested + lag_infested + dist_nearest_tree + (1|unique_ID) + (1|site), data = clump_sp, family = binomial(link = "logit"))
+
+clump.final.sp.sims <- simulateResiduals(clump.final.sp)
+plot(clump.final.sp.sims)
+
+summary(clump.final.sp)
+
+testZeroInflation(clump.final.sp.sims)
+
+r2(clump.final.sp)
+check_singularity(clump.final.sp)
+
+```
+
+###Large
+```{r}
+
+large_sp <- filter(model_data, dbh != 1.27)
+# Build model
+
+base.large.sp <- glmmTMB(
+  cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + (1|unique_ID) + (1|site),
+  data = large_sp,
+  family = binomial(link = "logit")
+)
+
+base.large.sp.sims <- simulateResiduals(base.large.sp)
+plot(base.large.sp.sims)
+
+summary(base.large.sp)
+
+# gouting
+
+gout.large.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+gout.large.sp.sims <- simulateResiduals(gout.large.sp)
+plot(gout.large.sp.sims)
+
+summary(gout.large.sp)
+
+# Add brooms (focal and neighborhood)
+
+broom.large.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_recode + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+broom.large.sp.sims <- simulateResiduals(broom.large.sp)
+plot(broom.large.sp.sims)
+
+summary(broom.large.sp)
+
+broom.nh.large.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + brooms_nh + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+broom.nh.large.sp.sims <- simulateResiduals(broom.nh.large.sp)
+plot(broom.nh.large.sp.sims)
+
+summary(broom.nh.large.sp)
+
+# Add beetle
+large.beetle.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + beetle_recode + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.beetle.sp.sims <- simulateResiduals(large.beetle.sp)
+plot(large.beetle.sp.sims)
+
+summary(large.beetle.sp)
+
+# Add perc. infested
+
+large.perc.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.perc.sp.sims <- simulateResiduals(large.perc.sp)
+plot(large.perc.sp.sims)
+
+summary(large.perc.sp)
+
+# distance to nearest tree
+
+large.dist.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.dist.sp.sims <- simulateResiduals(large.dist.sp)
+plot(large.dist.sp.sims)
+
+summary(large.dist.sp)
+
+# avg. dbh in neighborhood
+
+large.dbh.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + avg.dbh + dist_nearest_tree + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.dbh.sp.sims <- simulateResiduals(large.dbh.sp)
+plot(large.dbh.sp.sims)
+
+summary(large.dbh.sp)
+
+# lag infestation status
+
+large.lag.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + + dist_nearest_tree + lag_infested + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.lag.sp.sims <- simulateResiduals(large.lag.sp)
+plot(large.lag.sp.sims)
+
+summary(large.lag.sp)
+
+# mean percent live crown
+
+large.crown.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.crown.sp.sims <- simulateResiduals(large.crown.sp)
+plot(large.crown.sp.sims)
+
+summary(large.crown.sp)
+
+# N
+
+large.n.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + (1|unique_ID) + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.n.sp.sims <- simulateResiduals(large.n.sp)
+plot(large.n.sp.sims)
+
+summary(large.n.sp)
+
+# 
+
+# Building model above
+large.final.sp <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + (1|site), data = large_sp, family = binomial(link = "logit"))
+
+large.final.sp.sims <- simulateResiduals(large.final.sp)
+plot(large.final.sp.sims)
+
+summary(large.final.sp)
+
+testZeroInflation(large.final.sp.sims)
+
+# test spatial autocorrelation
+
+# Get all unique coordinates
+large_sp_spatial <- large_sp %>% dplyr::filter(!duplicated(large_sp$Latitude))
+
+# build model with these
+large.final.spatial <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + perc.infested + dist_nearest_tree + lag_infested + mean_percent_live_crown_std + n + (1|unique_ID) + (1|site), data = large_sp_spatial, family = binomial(link = "logit"))
+
+summary(large.final.spatial)
+
+testSpatialAutocorrelation(large.final.spatial, x = large_sp_spatial$Longitude, y = large_sp_spatial$Latitude)
+
+r2(large.final.sp)
+check_singularity(large.final.sp)
+```
+
+### Coef plot - spatial weights
+
+```{r}
+tidy_large_sp <- broom::tidy(large.final.sp) # Create a tidy dataframe for the model
+
+# Add a column to identify the model
+tidy_large_sp$model <- "large.sp" 
+
+dw_large_sp <- dwplot(tidy_large_sp)
+
+tidy_small_sp <- broom::tidy(clump.final.sp)
+
+tidy_small_sp$model <- "clump.sp"
+
+dw_small_sp <- dwplot(tidy_small_sp)
+
+tidy_all_sp <- rbind(tidy_large_sp, tidy_small_sp)
+
+dw_all_sp <- dwplot(tidy_all_sp) +
+  scale_y_discrete(
+    labels = c(
+              "logDISTANCE" = "Distance to nearest infested",
+               "infest_sum_std_new" = "Infestation sum (neighborhood)",
+               "dist_nearest_tree" = "Distance to nearest tree",
+                "lag_infested" = "Lagged Infestation Status",
+                "mean_percent_live_crown" = "Mean Percent Live Crown (neighborhood)",
+                "n" = "Number of infested (neighborhood)",
+                "gouting_recode" = "Gouting",
+                "logdbh" = "DBH"
+      ),
+    limits = c("logDISTANCE",
+                "mean_percent_live_crown_std",
+                "n",
+                "perc.infested",
+                "dist_nearest_tree",
+                "gouting_recode",
+                "logdbh",
+                "lag_infested"
+                ) # Specify the desired order
+  )
+
+
+print(dw_all_sp+geom_vline(xintercept=0,lty=2))
+```
+
+# Fir Apparency
+
+```{r}
+app_data <- merge_data
+
+#fix NA hts
+app_data$height[app_data$site=="EMIG" & is.na(app_data$height)] <-   app_data$dbh[is.na(app_data$height) & app_data$site == "EMIG"] * emig_ratio
+app_data$height <- as.numeric(app_data$height)
+app_data$height[app_data$site=="FRNK" & is.na(app_data$height)] <-   app_data$dbh[is.na(app_data$height) & app_data$site == "FRNK"] * frnk_ratio
+app_data$height <- as.numeric(app_data$height)
+app_data$height[app_data$site=="MOCR" & is.na(app_data$height)] <-   app_data$dbh[is.na(app_data$height) & app_data$site == "MOCR"] * mocr_ratio
+app_data$height <- as.numeric(app_data$height)
+app_data$height[app_data$site=="MTTP" & is.na(app_data$height)] <-   app_data$dbh[is.na(app_data$height) & app_data$site == "MTTP"] * mttp_ratio
+app_data$height <- as.numeric(app_data$height)
+app_data$height[app_data$site=="SOAP" & is.na(app_data$height)] <-   app_data$dbh[is.na(app_data$height) & app_data$site == "SOAP"] * soap_ratio
+app_data$height <- as.numeric(app_data$height)
+
+# Filter for comparable heights
+app_data <- app_data %>% filter(!is.na(dbh)) # take out clumps
+app_data <- app_data %>% filter(dbh >= 5.08) # take out trees less than 2 inches (our cutoff for non-hosts)
+
+
+  hts <- app_data %>% group_by(site, species) %>%
+    summarize(mean_height = mean(height, na.rm = TRUE))
+  
+# Extract ABLA mean height per site
+abla_heights <- hts %>%
+  filter(species == "ABLA") %>%
+  rename(abla_mean_height = mean_height) %>%
+  select(site, abla_mean_height)
+
+# Compute competition index for each site
+competition_index <- hts %>%
+  filter(species != "ABLA") %>%  # Exclude ABLA itself
+  left_join(abla_heights, by = "site") %>%  # Merge ABLA heights
+  mutate(difference = (abla_mean_height - mean_height) / abla_mean_height) %>%
+  group_by(site) %>%
+  summarize(
+    competition_index = sum(difference, na.rm = TRUE) * (1 / n()) * 100
+  )
+
+# Build model 
+
+
+```
+
+# Cox Survival Model
+
+## Data prep
+
+We need to redo spatial weights for all visits, not just 2,3,4
+
+```{r}
+proportions_list_all <- list()
+
+for (site in unique(all_merged$site)) {
+  
+  # Filter focal and complete datasets for the site
+  site_focal <- filter(local_data_10, site == !!site)   # Focal points to buffer
+  site_complete <- filter(all_merged, site == !!site)  # All points for bounding box
+  
+  # Convert focal points (already in UTM) to sf
+  site_focal_sf <- st_as_sf(site_focal, coords = c("Longitude", "Latitude"), crs = 32612)
+  
+  # Convert complete dataset (in decimal degrees) to sf and transform to UTM
+  site_complete_sf <- st_as_sf(site_complete, coords = c("Longitude", "Latitude"), crs = 4326)
+  site_complete_utm <- st_transform(site_complete_sf, 32612)  # Transform to UTM
+  
+  # Get bounding box for the site in UTM
+  site_bbox <- st_as_sfc(st_bbox(site_complete_utm))
+  
+  # Loop through each focal point and calculate proportions
+  site_proportions <- sapply(1:nrow(site_focal_sf), function(i) {
+    
+    # Create a 10m buffer for the focal point
+    buffer <- suppressWarnings(st_buffer(st_geometry(site_focal_sf)[i], dist = 10))
+    
+    # Compute the intersection between the buffer and the bounding box
+    intersection <- suppressWarnings(st_intersection(buffer, site_bbox))
+    
+    # Calculate areas (buffer area and intersection area)
+    circle_area <- suppressWarnings(st_area(buffer))
+    intersection_area <- suppressWarnings(st_area(intersection))
+    
+    # Calculate proportion of buffer inside the bounding box
+    proportion <- as.numeric(intersection_area / circle_area)
+    
+    return(proportion)
+  })
+  
+  # Store the proportions for the current site
+  proportions_list_all[[site]] <- site_proportions
+  
+  # Print progress for debugging
+  cat("Processed", site, "with", length(site_proportions), "focal points.\n")
+}
+
+
+# Now append these proportions to the original focal dataset
+all_visits_with_weights <- local_data_10 %>%
+  mutate(proportion = unlist(proportions_list_all))
+
+
+# change to long
+model_data_all <- all_visits_with_weights %>%
+  pivot_longer(
+    cols = ends_with("_v1") | ends_with("_v2") | ends_with("_v3") | ends_with("_v4"),  # columns with visit data
+    names_to = c(".value", "visit"),       # use ".value" to keep the original variable name
+    names_pattern = "(.*)_(v[0-9])"        # regex to separate variable name and visit
+  ) %>%
+  mutate(visit = as.numeric(gsub("v", "", visit)))  # Convert "v1", "v2", etc. to 1, 2, etc.
+
+names(model_data_all)[50] <- "t"
+
+# make logged and lagged variables
+
+model_data_all <- model_data_all %>%
+  arrange(unique_ID, t) %>%
+  group_by(unique_ID) %>%
+  mutate(
+    logDISTANCE = log(DISTANCE),
+    logDISTANCE_noclump = log(DISTANCE_noclump),
+    logDISTANCE_noinfest = log(DISTANCE_noinfest),
+    logdbh = log(dbh),
+    lag_logDISTANCE = lag(logDISTANCE),
+    lag_infest_sum_std_new = lag(infest_sum_std_new),
+    lag_infest_sum = lag(infestation_sum),
+    lag_Gouting = lag(Gouting),
+    lag_infested = lag(infested),
+    lag_perc.infested = lag(perc.infested),
+    lag_infestation_sum = lag(infestation_sum)
+  ) %>%
+  ungroup()
+
+model_data_all$qmd_under <- sqrt(((model_data_all$basal_area_non_host + model_data_all$basal_area_host)/(model_data_all$n*31.83))/0.00007854)
+
+#spatial weights
+model_data_all$infest_sum_std <- model_data_all$infest_sum_std * model_data_all$proportion
+model_data_all$avg.dbh <- model_data_all$avg.dbh * model_data_all$proportion
+model_data_all$mean_percent_live_crown_std <- model_data_all$mean_percent_live_crown_std * model_data_all$proportion
+model_data_all$brooms_nh <- model_data_all$brooms_nh * model_data_all$proportion
+model_data_all$perc.infested <- model_data_all$perc.infested * model_data_all$proportion
+model_data_all$basal_area_host_std <- model_data_all$basal_area_host_std * model_data_all$proportion
+model_data_all$mean_dist_infested_recode <- model_data_all$mean_dist_infested_recode * model_data_all$proportion
+model_data_all$n <- model_data_all$n * model_data_all$proportion
+
+# Filter live
+model_data_all$`Dead / Alive`[is.na(model_data_all$`Dead / Alive`)] <- 0
+model_data_all <- filter(model_data_all, model_data_all$`Dead / Alive` == 1)
+```
+
+
+```{r}
+#prop.final.long <- glmmTMB(cbind(infested, 1 - infested) ~ logdbh + logDISTANCE + gouting_recode + log_DISTANCE_noinfest + lag_infested + mean_percent_live_crown_std + n + perc.infested + comp_index + (1|site), data = model_data, family = binomial(link = "logit"))
+
+model_data_all$season <- ifelse(model_data_all$t == 1 | model_data_all$t == 3, 0,1)
+
+# Standardize all variables
+model_data_all$dbh_std <- scale(model_data_all$logdbh)
+model_data_all$DISTANCE_std <- scale(model_data_all$logDISTANCE)
+model_data_all$DISTANCE_noinfest_std <- scale(model_data_all$logDISTANCE_noinfest)
+model_data_all$n_std <- scale(model_data_all$n)
+model_data_all$perc.infested_std <- scale(model_data_all$perc.infested)
+
+
+cfit <- coxph(Surv(t, infested) ~ logdbh + logDISTANCE + gouting_recode + logDISTANCE_noinfest + lag_infested + mean_percent_live_crown_std + n + perc.infested + season, data = model_data_all )
+
+cfit_site <- coxph(Surv(t, infested) ~ logdbh + logDISTANCE + gouting_recode + logDISTANCE_noinfest + lag_infested + mean_percent_live_crown_std + n + perc.infested + season + strata(site), data = model_data_all )
+
+print(cfit)
+summary(cfit)
+
+round(cbind(simple= coef(cfit), stratified=coef(cfit_site)), 4)
+
+```
+
+
+
+# GLMMfields for each site
+
+```{r}
+data_long <- as.data.frame(data_long)
+
+infest_glmm_rf <- glmmfields(infested ~ logDISTANCE + avg.dbh + gouting_recode + logdbh + 
+    #lag_infested + 
+    perc.infested + dist_nearest_tree + mean_percent_live_crown_std, 
+  data = data_long, 
+  lon = "Longitude", 
+  lat = "Latitude",
+  nknots = 6,
+  chains = 2,
+  iter = 500,
+  time = "t", 
+  covariance = "matern",
+  cluster = "kmeans", 
+  binomial_N = "infested",
+  family = binomial(link = "logit"))
+
+rf_tidy <- tidy(infest_glmm_rf_emig)
+
+dw_rf <- dwplot(rf_tidy) +
+  scale_y_discrete(
+    labels = c("B[1]" = "Distance to nearest infested",
+               #"lag_infested" = "Lagged infestation status",
+               "B[6]" = "Distance to nearest tree",
+               "B[5]" = "Percent infested (neighborhood)",
+                "B[3]" = "Gouting",
+                "B[2]" = "Average dbh in neighborhood",
+                "B[4]" = "DBH",
+                "B[7]" = "Mean percent live crown (Neighborhood)",
+                "gp_sigma" = "Sigma",
+                "gp_theta" = "Theta"
+      ),
+    limits = c( "gp_sigma",
+                "gp_theta",
+                "B[1]",
+                "B[7]",
+                "B[2]",
+                "B[5]",
+                "B[6]",
+                "B[4]",
+                "B[3]" 
+                #"lag_infested"
+      ) # Specify the desired order
+  )
+
+
+print(dw_rf+geom_vline(xintercept=0,lty=2))
+
+```
+
+# Stem maps
+
+```{r}
+plot_data <- merge_data
+
+plot_data <- plot_data %>%
+  mutate(
+    status_v1 = case_when(
+      `Dead / Alive_v1` == 0 ~ "Dead",                             
+      host_non == 0 ~ "NonHost",                           
+      host_non == 1 & infested_v1 == 0 ~ "NonInfested", 
+      host_non == 1 & infested_v1 == 1 ~ "Infested",     
+      TRUE ~ NA_character_                            
+    ),
+    status_v2 = case_when(
+      `Dead / Alive_v2` == 0 ~ "Dead",                             
+      host_non == 0 ~ "NonHost",                           
+      host_non == 1 & infested_v2 == 0 ~ "NonInfested", 
+      host_non == 1 & infested_v2 == 1 ~ "Infested", 
+      host_non == 1 & infested_v1 == 0 & infested_v2 == 1 ~ "New Infested",
+      TRUE ~ NA_character_                            
+    ),
+    status_v3 = case_when(
+      `Dead / Alive_v3` == 0 ~ "Dead",                             
+      host_non == 0 ~ "NonHost",                           
+      host_non == 1 & infested_v3 == 0 ~ "NonInfested", 
+      host_non == 1 & infested_v3 == 1 ~ "Infested",
+      host_non == 1 & infested_v2 == 0 & infested_v3 == 1 ~ "New Infested",
+      TRUE ~ NA_character_                            
+    ),
+    status_v4 = case_when(
+      `Dead / Alive_v4` == 0 ~ "Dead",                             
+      host_non == 0 ~ "NonHost",                           
+      host_non == 1 & infested_v4 == 0 ~ "NonInfested", 
+      host_non == 1 & infested_v4 == 1 ~ "Infested", 
+      host_non == 1 & infested_v3 == 0 & infested_v4 == 1 ~ "New Infested",
+      TRUE ~ NA_character_                            
+    )
+  )
+
+
+```
+
+# New plots
+
+```{r}
+data_new <- local_data_10
+
+data_new <- data_new %>%
+  mutate(size_class = cut(dbh, breaks = seq(0, max(dbh, na.rm = TRUE) + 5, by = 5), right = FALSE))
+
+# Summarize new infestations by size class
+size_summary <- data_new %>%
+  group_by(size_class) %>%
+  summarize(
+    new_infestations_v2 = sum(new_infested_v2, na.rm = TRUE),
+    new_infestations_v3 = sum(new_infested_v3, na.rm = TRUE),
+    new_infestations_v4 = sum(new_infested_v4, na.rm = TRUE),
+    new_infestations_all = sum(new_infested_v2 + new_infested_v3 + new_infested_v4), na.rm = TRUE)
+    .groups = "drop"
+  )
+
+# Plot the data
+ggplot(size_summary, aes(x = size_class, y = new_infestations_all)) +
+  geom_bar(stat = "identity", fill = "skyblue", alpha = 0.8) +
+  labs(
+    title = "New Infestations by DBH Size Class",
+    x = "Size Class (cm)",
+    y = "Number of New Infestations"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# checking totals for models and data
+total_model_new <- sum(model_data_new$new_infested)
+total_data_new <- sum(size_summary$new_infestations_all)
+```
+

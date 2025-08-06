@@ -1,0 +1,2472 @@
+---
+title: "Point Pattern Analysis 2"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Point Processes another time
+3/25/24
+Michael Wayman
+
+The purpose of this script is to do point pattern analysis a slightly different way. 1) Get all of our points into the same window by using plot coordinates instead of real world coordinates (eg. 0 through 50 instead of UTM or degrees) 2) compare not only infested to host distribution, but infested to non-infested so we can compare various states.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# clean out environment
+
+```{r}
+rm(list = ls())
+
+```
+
+# Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+library(lme4) # to use glmer
+
+```
+
+# Load data
+
+```{r, warning=FALSE, echo=FALSE}
+
+trees <- read_xlsx("data_with_nearest_info.xlsx")
+
+# all_trees <- read_xlsx("all_sites_with_points.xlsx") # This is just visit 4
+
+all_trees <- read_xlsx("all_merged_all_spp.xlsx")
+
+```
+
+# Coordinate conversion
+
+We need to separate by site and then convert to plot coordinates. Then we can plot everything in the same window easily.
+
+```{r}
+
+# GEt infestation variable again...
+all_trees[all_trees == "-"] <- "0" # change all "-" to a zero
+
+# all_trees <- all_trees %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1","NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2","NL_v3", "NM_v3", "NH_v3", "SL_v3", "SM_v3", "SH_v3","NL_v4", "NM_v4", "NH_v4", "SL_v4", "SM_v4", "SH_v4" )), 
+#             ~ if_else(startsWith(as.character(.), "1-"), "1", as.character(.))) # Change all "1-" ratings to just a singular 1 value
+# 
+# all_trees <- all_trees %>%
+#   mutate_at(vars(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1","NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2","NL_v3", "NM_v3", "NH_v3", "SL_v3", "SM_v3", "SH_v3","NL_v4", "NM_v4", "NH_v4", "SL_v4", "SM_v4", "SH_v4" )), as.numeric)
+
+# all_trees <- all_trees %>%
+#    mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH" )), 
+#              ~ if_else(startsWith(as.character(.), "1-"), "1", as.character(.))) # Change all "1-" ratings to just a singular 1 value
+#  
+#  all_trees <- all_trees %>%
+#    mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH" )), as.numeric)
+
+# all_trees$NL[is.na(all_trees$NL)] <- 0
+# all_trees$NM[is.na(all_trees$NM)] <- 0
+# all_trees$NH[is.na(all_trees$NH)] <- 0
+# all_trees$SL[is.na(all_trees$SL)] <- 0
+# all_trees$SM[is.na(all_trees$SM)] <- 0
+# all_trees$SH[is.na(all_trees$SH)] <- 0
+
+ #all_trees <- all_trees %>%
+   #mutate(infested = ifelse(NL + NM + NH + SL + SM + SH != 0, 1, 0))
+# 
+# all_trees <- all_trees[!is.na(all_trees$Longitude),] # get rid of NAs
+
+
+# convert to UTM to get nice "square" plots
+xy = data.frame(all_trees$Longitude, all_trees$Latitude)
+xy <- xy[!is.na(xy$all_trees.Longitude),] # Get rid of NAs
+coordinates(xy) <- c("all_trees.Longitude", "all_trees.Latitude")
+proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")
+NE <- spTransform(xy, CRS("+proj=utm +zone=12 ellps=WGS84"))
+NE <- as.data.frame(NE)
+
+all_trees$Longitude <- NE$coords.x1
+all_trees$Latitude <- NE$coords.x2
+
+#Marks for status - we'll do marks for non-hosts and then hosts with and w/o infestation
+# all_trees$infested = as.factor(all_trees$infested)
+all_trees <- all_trees %>% mutate(host = ifelse(species == "ABLA" | species == "ABCO", 1, 0))
+all_trees$host <- as.factor(all_trees$host)
+# take care of NA's
+all_trees$infested_v1[is.na(all_trees$infested_v1)] <- 0
+all_trees$infested_v2[is.na(all_trees$infested_v2)] <- 0
+all_trees$infested_v3[is.na(all_trees$infested_v3)] <- 0
+all_trees$infested_v4[is.na(all_trees$infested_v4)] <- 0
+
+all_trees <- all_trees %>%
+  mutate(marks_v1 = case_when(
+    host == 0 ~ factor("NH"),
+    infested_v1 == 1 & host == 1 ~ factor("I"),
+    infested_v1 == 0 & host == 1 ~ factor("N")),
+    marks_v2 = case_when(
+    host == 0 ~ factor("NH"),
+    infested_v2 == 1 & host == 1 ~ factor("I"),
+    infested_v2 == 0 & host == 1 ~ factor("N")),
+    marks_v3 = case_when(
+    host == 0 ~ factor("NH"),
+    infested_v3 == 1 & host == 1 ~ factor("I"),
+    infested_v3 == 0 & host == 1 ~ factor("N")),
+    marks_v4 = case_when(
+    host == 0 ~ factor("NH"),
+    infested_v4 == 1 & host == 1 ~ factor("I"),
+    infested_v4 == 0 & host == 1 ~ factor("N")),
+    marks_new_v2 = case_when(
+      host == 0 ~ factor("NH"),
+      (infested_v1 == 0 & infested_v2) == 1 ~ factor("I"),
+      (infested_v1 == 0 & infested_v2) == 0 ~ factor("N"),
+      (infested_v1 == 1 & infested_v2) == 1 ~ factor("O"),
+      (infested_v1 == 1 & infested_v2) == 0 ~ factor("O")
+    ),
+    marks_new_v3 = case_when(
+      host == 0 ~ factor("NH"),
+      (infested_v2 == 0 & infested_v3 == 1) & host == 1 ~ factor("I"),
+      (infested_v2 == 0 & infested_v3 == 0) & host == 1 ~ factor("N"),
+      (infested_v2 == 1 & infested_v3 == 1) & host == 1 ~ factor("O"),
+      (infested_v2 == 1 & infested_v3 == 0) & host == 1 ~ factor("O")
+    ),
+     marks_new_v4 = case_when(
+      host == 0 ~ factor("NH"),
+      (infested_v3 == 0 & infested_v4 == 1) & host == 1 ~ factor("I"),
+      (infested_v3 == 0 & infested_v4 == 0) & host == 1 ~ factor("N"),
+      (infested_v3 == 1 & infested_v4 == 1) & host == 1 ~ factor("O"),
+      (infested_v3 == 1 & infested_v4 == 0) & host == 1 ~ factor("O")))
+
+#writexl::write_xlsx(all_trees, "trees_for_spatial_tests.xlsx")
+
+#names(all_trees)[6] <- "site"
+cxsp <- all_trees %>% dplyr::filter(site == "CXSP")
+emig <- all_trees %>% dplyr::filter(site == "EMIG")
+frnk <- all_trees %>% dplyr::filter(site == "FRNK")
+mocr <- all_trees %>% dplyr::filter(site == "MOCR")
+mttp <- all_trees %>% dplyr::filter(site == "MTTP")
+smmh <- all_trees %>% dplyr::filter(site == "SMMH")
+soap <- all_trees %>% dplyr::filter(site == "SOAP")
+tmpf <- all_trees %>% dplyr::filter(site == "TMPF")
+
+# Function to scale GPS coordinates
+scale_coordinates <- function(coord, min_val, max_val) {
+  scaled_coord <- (coord - min(coord)) / (max(coord) - min(coord)) * (max_val - min_val) + min_val
+  return(scaled_coord)
+}
+
+# Scale longitude and latitude to plot coordinates (0 to 50)
+cxsp$plot_x <- scale_coordinates(cxsp$Longitude, 0, 50)
+cxsp$plot_y <- scale_coordinates(cxsp$Latitude, 0, 50)
+
+# Plot the scaled coordinates to check
+plot(cxsp$plot_x, cxsp$plot_y, type = 'p', pch = 16, col = 'blue', xlab = 'X', ylab = 'Y', main = 'GPS Data Scaled to Plot Coordinates')
+
+# repeat for all plots
+emig$plot_x <- scale_coordinates(emig$Longitude, 0, 50)
+emig$plot_y <- scale_coordinates(emig$Latitude, 0, 50)
+
+frnk$plot_x <- scale_coordinates(frnk$Longitude, 0, 50)
+frnk$plot_y <- scale_coordinates(frnk$Latitude, 0, 50)
+
+mocr$plot_x <- scale_coordinates(mocr$Longitude, 0, 50)
+mocr$plot_y <- scale_coordinates(mocr$Latitude, 0, 50)
+
+mttp$plot_x <- scale_coordinates(mttp$Longitude, 0, 50)
+mttp$plot_y <- scale_coordinates(mttp$Latitude, 0, 50)
+
+smmh$plot_x <- scale_coordinates(smmh$Longitude, 0, 50)
+smmh$plot_y <- scale_coordinates(smmh$Latitude, 0, 50)
+
+soap$plot_x <- scale_coordinates(soap$Longitude, 0, 50)
+soap$plot_y <- scale_coordinates(soap$Latitude, 0, 50)
+
+tmpf$plot_x <- scale_coordinates(tmpf$Longitude, 0, 50)
+tmpf$plot_y <- scale_coordinates(tmpf$Latitude, 0, 50)
+```
+
+# Window and PPP objects
+
+```{r}
+
+#Window
+window = owin(c(0,50),
+              c(0,50))
+
+# Loop all sites to get ppp and pcf objects
+
+sites <- c("cxsp", "emig", "frnk", "mocr", "mttp", "smmh", "soap", "tmpf")
+
+# this function takes a site, creates a ppp and pcf object, spits them out and plots the site's pcf
+ppp_pcf <- function(i) {
+obj_name <- deparse(substitute(i))
+i.ppp <- ppp(i$plot_x, i$plot_y, window = window, marks = i$marks_v1)
+i.pcf <- pcfinhom(i.ppp, r = 0:20, nsim =3)
+assign(paste0(obj_name, ".ppp"), i.ppp, envir = .GlobalEnv)
+assign(paste0(obj_name, ".pcf"), i.pcf, envir = .GlobalEnv)
+plot(i.pcf)
+}
+
+ppp_pcf(cxsp)
+ppp_pcf(emig)
+ppp_pcf(frnk)
+ppp_pcf(mocr)
+ppp_pcf(mttp)
+ppp_pcf(smmh)
+ppp_pcf(soap)
+ppp_pcf(tmpf)
+
+```
+
+# Envelopes
+
+```{r}
+cxsp.pcf.envelope = envelope(cxsp.ppp, fun = pcfinhom, r=seq(0,50,.5),nsim=99,simulate=expression(runifpoint(nrow(cxsp),win=window)))
+plot(cxsp.pcf.envelope)
+
+```
+
+# Tests
+
+## Cox Springs
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+cxsp_inf_all <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='I']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(cxsp_inf_all)
+
+
+# Infested - Infested
+cxsp_inf_inf <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(cxsp_inf_inf)
+
+# Infested - Non-infested
+cxsp_inf_non_1 <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(cxsp_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "CXSP - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+
+# Infested - All host
+cxsp_inf_host_1 <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(cxsp_inf_host_1)
+
+# Non-infested - All
+cxsp_noninf_all <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='I']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(cxsp_noninf_all)
+
+# Hosts - All
+cxsp_host_non <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I' | cxsp.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='I']),
+                                          (rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+png("cxsp_inf_non_1.png", width = 800, height = 600)
+plot(cxsp_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "CXSP - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 2 
+cxsp.ppp <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v2)
+
+cxsp_inf_non_2 <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("cxsp_inf_non_2.png", width = 800, height = 600)
+plot(cxsp_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "CXSP - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+cxsp.ppp <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v3)
+
+cxsp_inf_non_3 <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("cxsp_inf_non_3.png", width = 800, height = 600)
+plot(cxsp_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "CXSP - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+cxsp.ppp <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v4)
+
+cxsp_inf_non_4 <- envelope(Y=cxsp.ppp[cxsp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp)[rlabel(cxsp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("cxsp_inf_non_4.png", width = 800, height = 600)
+plot(cxsp_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "CXSP - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(cxsp.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+
+```
+
+## Emigration Canyon
+
+```{r, warning=FALSE}
+#Tests - Time 1
+#Infested - All
+emig_inf_all <- envelope(Y=emig.ppp[emig.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N']),
+                                          (rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='I']),
+                                          (rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(emig_inf_all)
+
+# Infested - Non-infested
+emig_inf_non_1 <- envelope(Y=emig.ppp[emig.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("emig_inf_non_1.png", width = 800, height = 600)
+plot(emig_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "EMIG - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Infested - All host
+emig_inf_host_1 <- envelope(Y=emig.ppp[emig.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N']),
+                                          (rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(emig_inf_host_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(3, 1, 2, 2),
+  main = "EMIG - Infested vs Host Trees",
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+
+# Non-infested - All
+emig_noninf_all <- envelope(Y=emig.ppp[emig.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N']),
+                                          (rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='I']),
+                                          (rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(emig_noninf_all)
+
+# Hosts - Non-hosts
+emig_host_non <- envelope(Y=emig.ppp[emig.ppp$marks=='I' | emig.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(emig_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+emig.ppp <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v2)
+
+emig_inf_non_2 <- envelope(Y=emig.ppp[emig.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("emig_inf_non_2.png", width = 800, height = 600)
+plot(emig_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "EMIG - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+emig.ppp <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v3)
+
+emig_inf_non_3 <- envelope(Y=emig.ppp[emig.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("emig_inf_non_3.png", width = 800, height = 600)
+plot(emig_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "EMIG - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+emig.ppp <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v4)
+
+emig_inf_non_4 <- envelope(Y=emig.ppp[emig.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp)[rlabel(emig.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("emig_inf_non_4.png", width = 800, height = 600)
+plot(emig_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "EMIG - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr.emig <- envelope(emig.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+
+```
+
+## Smith and Morehouse
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+smmh_inf_all <- envelope(Y=smmh.ppp[smmh.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='N']),
+                                          (rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(smmh_inf_all)
+
+# Infested - Non-infested
+smmh_inf_non_1 <- envelope(Y=smmh.ppp[smmh.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("smmh_inf_non_1.png", width = 800, height = 600)
+plot(smmh_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SMMH - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Non-infested - All
+smmh_noninf_all <- envelope(Y=smmh.ppp[smmh.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='N']),
+                                          (rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(smmh_noninf_all)
+
+# Hosts - Non-hosts
+smmh_host_non <- envelope(Y=smmh.ppp[smmh.ppp$marks=='I' | smmh.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(smmh_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+smmh.ppp <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v2)
+
+smmh_inf_non_2 <- envelope(Y=smmh.ppp[smmh.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("smmh_inf_non_2.png", width = 800, height = 600)
+plot(smmh_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SMMH - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+smmh.ppp <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v3)
+
+smmh_inf_non_3 <- envelope(Y=smmh.ppp[smmh.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("smmh_inf_non_3.png", width = 800, height = 600)
+plot(smmh_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SMMH - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+smmh.ppp <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v4)
+
+smmh_inf_non_4 <- envelope(Y=smmh.ppp[smmh.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp)[rlabel(smmh.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("smmh_inf_non_4.png", width = 800, height = 600)
+plot(smmh_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SMMH - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(smmh.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+
+```
+
+## Franklin Basin
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+frnk_inf_all <- envelope(Y=frnk.ppp[frnk.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='N']),
+                                          (rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(frnk_inf_all)
+
+# Infested - Non-infested
+frnk_inf_non_1 <- envelope(Y=frnk.ppp[frnk.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("frnk_inf_non_1.png", width = 800, height = 600)
+plot(frnk_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "FRNK - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Non-infested - All
+frnk_noninf_all <- envelope(Y=frnk.ppp[frnk.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='N']),
+                                          (rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(frnk_noninf_all)
+
+# Hosts - Non-hosts
+frnk_host_non <- envelope(Y=frnk.ppp[frnk.ppp$marks=='I' | frnk.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(frnk_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+frnk.ppp <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v2)
+
+frnk_inf_non_2 <- envelope(Y=frnk.ppp[frnk.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("frnk_inf_non_2.png", width = 800, height = 600)
+plot(frnk_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "FRNK - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+frnk.ppp <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v3)
+
+frnk_inf_non_3 <- envelope(Y=frnk.ppp[frnk.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("frnk_inf_non_3.png", width = 800, height = 600)
+plot(frnk_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "FRNK - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+frnk.ppp <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v4)
+
+frnk_inf_non_4 <- envelope(Y=frnk.ppp[frnk.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp)[rlabel(frnk.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("frnk_inf_non_4.png", width = 800, height = 600)
+plot(frnk_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "FRNK - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(frnk.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+
+```
+
+## Monte Cristo
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+mocr_inf_all <- envelope(Y=mocr.ppp[mocr.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='N']),
+                                          (rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mocr_inf_all)
+
+# Infested - Non-infested
+mocr_inf_non_1 <- envelope(Y=mocr.ppp[mocr.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mocr_inf_non_1.png", width = 800, height = 600)
+plot(mocr_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MOCR - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Non-infested - All
+mocr_noninf_all <- envelope(Y=mocr.ppp[mocr.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='N']),
+                                          (rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mocr_noninf_all)
+
+# Hosts - Non-hosts
+mocr_host_non <- envelope(Y=mocr.ppp[mocr.ppp$marks=='I' | mocr.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mocr_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+mocr.ppp <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v2)
+
+mocr_inf_non_2 <- envelope(Y=mocr.ppp[mocr.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mocr_inf_non_2.png", width = 800, height = 600)
+plot(mocr_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MOCR - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+mocr.ppp <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v3)
+
+mocr_inf_non_3 <- envelope(Y=mocr.ppp[mocr.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mocr_inf_non_3.png", width = 800, height = 600)
+plot(mocr_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MOCR - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+mocr.ppp <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v4)
+
+mocr_inf_non_4 <- envelope(Y=mocr.ppp[mocr.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp)[rlabel(mocr.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mocr_inf_non_4.png", width = 800, height = 600)
+plot(mocr_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MOCR - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(mocr.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+
+```
+
+## Mount Timpanogos
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+mttp_inf_all <- envelope(Y=mttp.ppp[mttp.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='N']),
+                                          (rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mttp_inf_all)
+
+# Infested - Non-infested
+mttp_inf_non_1 <- envelope(Y=mttp.ppp[mttp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mttp_inf_non_1.png", width = 800, height = 600)
+plot(mttp_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MTTP - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Non-infested - All
+mttp_noninf_all <- envelope(Y=mttp.ppp[mttp.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='N']),
+                                          (rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mttp_noninf_all)
+
+# Hosts - Non-hosts
+mttp_host_non <- envelope(Y=mttp.ppp[mttp.ppp$marks=='I' | mttp.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mttp_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+mttp.ppp <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v2)
+
+mttp_inf_non_2 <- envelope(Y=mttp.ppp[mttp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mttp_inf_non_2.png", width = 800, height = 600)
+plot(mttp_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MTTP - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+mttp.ppp <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v3)
+
+mttp_inf_non_3 <- envelope(Y=mttp.ppp[mttp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mttp_inf_non_3.png", width = 800, height = 600)
+plot(mttp_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MTTP - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+mttp.ppp <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v4)
+
+mttp_inf_non_4 <- envelope(Y=mttp.ppp[mttp.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp)[rlabel(mttp.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("mttp_inf_non_4.png", width = 800, height = 600)
+plot(mttp_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "MTTP - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(mttp.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+```
+
+## Soapstone Basin
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+soap_inf_all <- envelope(Y=soap.ppp[soap.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='N']),
+                                          (rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(soap_inf_all)
+
+# Infested - Non-infested
+soap_inf_non_1 <- envelope(Y=soap.ppp[soap.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("soap_inf_non_1.png", width = 800, height = 600)
+plot(soap_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SOAP - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Non-infested - All
+soap_noninf_all <- envelope(Y=soap.ppp[soap.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='N']),
+                                          (rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(soap_noninf_all)
+
+# Hosts - Non-hosts
+soap_host_non <- envelope(Y=soap.ppp[soap.ppp$marks=='I' | soap.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(soap_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+soap.ppp <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v2)
+
+soap_inf_non_2 <- envelope(Y=soap.ppp[soap.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("soap_inf_non_2.png", width = 800, height = 600)
+plot(soap_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SOAP - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+soap.ppp <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v3)
+
+soap_inf_non_3 <- envelope(Y=soap.ppp[soap.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("soap_inf_non_3.png", width = 800, height = 600)
+plot(soap_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SOAP - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+soap.ppp <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v4)
+
+soap_inf_non_4 <- envelope(Y=soap.ppp[soap.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp)[rlabel(soap.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("soap_inf_non_4.png", width = 800, height = 600)
+plot(soap_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "SOAP - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(soap.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+
+```
+
+## Temple Fork
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+tmpf_inf_all <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='N']),
+                                          (rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(tmpf_inf_all)
+
+# Infested - Non-infested
+tmpf_inf_non_1 <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("tmpf_inf_non_1.png", width = 800, height = 600)
+plot(tmpf_inf_non_1,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "TMPF - Infested vs Non-infested Trees - Visit 1",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Non-infested - All
+tmpf_noninf_all <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='N'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='N']),
+                                          (rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(tmpf_noninf_all)
+
+# Hosts - Non-hosts
+tmpf_host_non <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='I' | tmpf.ppp$marks=="N"],fun=pcfinhom,r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='NH'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(tmpf_host_non)
+
+# Infested vs non-infested - times 2,3,4 and then host distribution
+
+# Time 2 
+tmpf.ppp <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v2)
+
+tmpf_inf_non_2 <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("tmpf_inf_non_2.png", width = 800, height = 600)
+plot(tmpf_inf_non_2,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "TMPF - Infested vs Non-infested Trees - Visit 2",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 3 
+tmpf.ppp <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v3)
+
+tmpf_inf_non_3 <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("tmpf_inf_non_3.png", width = 800, height = 600)
+plot(tmpf_inf_non_3,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "TMPF - Infested vs Non-infested Trees - Visit 3",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Time 4 
+tmpf.ppp <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v4)
+
+tmpf_inf_non_4 <- envelope(Y=tmpf.ppp[tmpf.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp)[rlabel(tmpf.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+png("tmpf_inf_non_4.png", width = 800, height = 600)
+plot(tmpf_inf_non_4,
+  col = c("red", "black", "blue", "grey"),
+  lwd = c(1, 1, 2, 2),
+  main = "TMPF - Infested vs Non-infested Trees - Visit 4",
+  legend = FALSE,
+  xlab = "Distance (r)",
+  ylab = "pcf (inhomogeneous)", 
+  ylim = c(0,10))
+legend(
+  "topright",
+  legend = c("Simulation Envelope", "Observed", "Simulation Mean"),
+  col = c("grey", "red", "black"),
+  lwd = c(1, 1, 2),
+  lty = c(1, 1, 2),
+  cex = 0.8
+)
+dev.off()
+
+# Host tree distribution
+Lcsr <- envelope(tmpf.ppp, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+```
+
+# Plot all host distributions
+
+```{r}
+# Extract values from sites
+Lemig <- Lest(emig.ppp)   
+r_emig <- Lemig$r         
+Lr_emig <- Lemig$iso 
+Lfrnk <- Lest(frnk.ppp)   
+r_frnk <- Lfrnk$r         
+Lr_frnk <- Lfrnk$iso 
+Lmocr <- Lest(mocr.ppp)   
+r_mocr <- Lmocr$r         
+Lr_mocr <- Lmocr$iso 
+Lmttp <- Lest(mttp.ppp)   
+r_mttp <- Lmttp$r         
+Lr_mttp <- Lmttp$iso 
+Lsmmh <- Lest(smmh.ppp)   
+r_smmh <- Lsmmh$r         
+Lr_smmh <- Lsmmh$iso 
+Lsoap <- Lest(soap.ppp)   
+r_soap <- Lsoap$r         
+Lr_soap <- Lsoap$iso 
+Ltmpf <- Lest(tmpf.ppp)   
+r_tmpf <- Ltmpf$r         
+Lr_tmpf <- Ltmpf$iso 
+
+png("host_distributions.png", width = 800, height = 600)
+plot(
+  Lcsr, 
+  . - r ~ r,      
+  shade = c("hi", "lo"),          
+  legend = FALSE,                 
+  main = "Host Distributions by site", 
+  xlab = "Distance (r)", 
+  ylab = "L(r) - r",
+  ylim = c(-1,4)
+)
+
+# add lines
+lines(r_emig, Lr_emig - r_emig, col = "blue", lwd = 2)  
+lines(r_frnk, Lr_frnk - r_frnk, col = "green", lwd = 2) 
+lines(r_mocr, Lr_mocr - r_mocr, col = "yellow", lwd = 2)
+lines(r_mttp, Lr_mttp - r_mttp, col = "orange", lwd = 2)  
+lines(r_smmh, Lr_smmh - r_smmh, col = "violet", lwd = 2)
+lines(r_soap, Lr_soap - r_soap, col = "skyblue", lwd = 2)
+lines(r_tmpf, Lr_tmpf - r_tmpf, col = "purple", lwd = 2)  
+
+# Add a custom legend
+legend(
+  "topright", 
+  legend = c("Cox Springs", "Emigration Canyon", "Franklin Basin", "Monte Cristo", "Mount Timpanogos", "Smith and Morehouse", "Soapstone Basin", "Temple Fork", "Simulation Envelope"),
+  col = c("black", "blue", "green", "yellow", "orange", "violet", "skyblue", "purple", "gray"),
+  lwd = c(2, 2, 2, 2, 2, 2, 2, 2, 1),
+  lty = c(1, 1, 1, 1, 1, 1, 1, 1, 1),
+  cex = 0.4
+)
+dev.off()
+
+```
+
+# No small trees
+
+```{r}
+
+cxsp.no.small <- cxsp %>% dplyr::filter(!is.na(dbh))
+emig.no.small <- emig %>% dplyr::filter(!is.na(dbh))
+frnk.no.small <- frnk %>% dplyr::filter(!is.na(dbh))
+mocr.no.small <- mocr %>% dplyr::filter(!is.na(dbh))
+mttp.no.small <- mttp %>% dplyr::filter(!is.na(dbh))
+smmh.no.small <- smmh %>% dplyr::filter(!is.na(dbh))
+soap.no.small <- soap %>% dplyr::filter(!is.na(dbh))
+tmpf.no.small <- tmpf %>% dplyr::filter(!is.na(dbh))
+
+ppp_pcf(cxsp.no.small)
+ppp_pcf(emig.no.small)
+ppp_pcf(frnk.no.small)
+ppp_pcf(mocr.no.small)
+ppp_pcf(mttp.no.small)
+ppp_pcf(smmh.no.small)
+ppp_pcf(soap.no.small)
+ppp_pcf(tmpf.no.small)
+
+```
+
+# Tests with no small
+
+## CXSP
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+cxsp_inf_all_big <- envelope(Y=cxsp.no.small.ppp[cxsp.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.no.small.ppp)[rlabel(cxsp.no.small.ppp)$marks=='N']),
+                                          (rlabel(cxsp.no.small.ppp)[rlabel(cxsp.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+# Infested - Non-infested
+cxsp_inf_non_big <- envelope(Y=cxsp.no.small.ppp[cxsp.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.no.small.ppp)[rlabel(cxsp.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(cxsp_inf_all_big)
+plot(cxsp_inf_all)
+plot(cxsp_inf_non)
+plot(cxsp_inf_non_big)
+
+```
+## EMIG
+
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+emig_inf_all_big <- envelope(Y=emig.no.small.ppp[emig.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.no.small.ppp)[rlabel(emig.no.small.ppp)$marks=='N']),
+                                          (rlabel(emig.no.small.ppp)[rlabel(emig.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(emig_inf_all)
+plot(emig_inf_all_big)
+
+# Infested - Non-infested
+emig_inf_non_big <- envelope(Y=emig.no.small.ppp[emig.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.no.small.ppp)[rlabel(emig.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(emig_inf_non)
+plot(emig_inf_non_big)
+
+```
+
+## FRNK
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+frnk_inf_all_big <- envelope(Y=frnk.no.small.ppp[frnk.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.no.small.ppp)[rlabel(frnk.no.small.ppp)$marks=='N']),
+                                          (rlabel(frnk.no.small.ppp)[rlabel(frnk.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+# Infested - Non-infested
+frnk_inf_non_big <- envelope(Y=frnk.no.small.ppp[frnk.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.no.small.ppp)[rlabel(frnk.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(frnk_inf_all_big)
+plot(frnk_inf_all)
+plot(frnk_inf_non_big)
+plot(frnk_inf_non)
+
+```
+
+## MOCR
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+mocr_inf_all_big <- envelope(Y=mocr.no.small.ppp[mocr.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.no.small.ppp)[rlabel(mocr.no.small.ppp)$marks=='N']),
+                                          (rlabel(mocr.no.small.ppp)[rlabel(mocr.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mocr_inf_all_big)
+plot(mocr_inf_all)
+
+# Infested - Non-infested
+mocr_inf_non_big <- envelope(Y=mocr.no.small.ppp[mocr.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.no.small.ppp)[rlabel(mocr.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(mocr_inf_non_big)
+plot(mocr_inf_non)
+
+```
+
+## MTTP
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+mttp_inf_all_big <- envelope(Y=mttp.no.small.ppp[mttp.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.no.small.ppp)[rlabel(mttp.no.small.ppp)$marks=='N']),
+                                          (rlabel(mttp.no.small.ppp)[rlabel(mttp.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+# Infested - Non-infested
+mttp_inf_non_big <- envelope(Y=mttp.no.small.ppp[mttp.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.no.small.ppp)[rlabel(mttp.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(mttp_inf_all_big)
+plot(mttp_inf_all)
+plot(mttp_inf_non_big)
+plot(mttp_inf_non)
+
+```
+
+## SMMH
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+smmh_inf_all_big <- envelope(Y=smmh.no.small.ppp[smmh.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.no.small.ppp)[rlabel(smmh.no.small.ppp)$marks=='N']),
+                                          (rlabel(smmh.no.small.ppp)[rlabel(smmh.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+# Infested - Non-infested
+smmh_inf_non_big <- envelope(Y=smmh.no.small.ppp[smmh.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.no.small.ppp)[rlabel(smmh.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(smmh_inf_all_big)
+plot(smmh_inf_all)
+plot(smmh_inf_non_big)
+plot(smmh_inf_non)
+
+```
+
+## SOAP
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+soap_inf_all_big <- envelope(Y=soap.no.small.ppp[soap.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.no.small.ppp)[rlabel(soap.no.small.ppp)$marks=='N']),
+                                          (rlabel(soap.no.small.ppp)[rlabel(soap.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(soap_inf_all_big)
+plot(soap_inf_all)
+
+# Infested - Non-infested
+soap_inf_non_big <- envelope(Y=soap.no.small.ppp[soap.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.no.small.ppp)[rlabel(soap.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(soap_inf_non_big)
+plot(soap_inf_non)
+
+```
+
+## TMPF
+```{r, warning=FALSE}
+
+#Tests - Time 1
+#Infested - All
+tmpf_inf_all_big <- envelope(Y=tmpf.no.small.ppp[tmpf.no.small.ppp$marks=='I'], fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.no.small.ppp)[rlabel(tmpf.no.small.ppp)$marks=='N']),
+                                          (rlabel(tmpf.no.small.ppp)[rlabel(tmpf.no.small.ppp)$marks=='I'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(tmpf_inf_all_big)
+plot(tmpf_inf_all)
+
+# Infested - Non-infested
+tmpf_inf_non_big <- envelope(Y=tmpf.no.small.ppp[tmpf.no.small.ppp$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.no.small.ppp)[rlabel(tmpf.no.small.ppp)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+plot(tmpf_inf_non_big)
+plot(tmpf_inf_non)
+
+```
+
+# Do this again with all visits data
+
+```{r, warning=FALSE, echo=FALSE}
+
+all_trees <- read_xlsx("data_with_nearest_info.xlsx")
+
+all_trees <- all_trees %>% mutate_at(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1", "NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2", "NL_v3", "NM_v3", "NH_v3", "SL_v3", "SM_v3", "SH_v3", "NL_v4", "NM_v4", "NH_v4", "SL_v4", "SM_v4", "SH_v4"), ~ replace_na(., 0))
+
+all_trees <- all_trees %>%
+  mutate(infested_v1 = ifelse(NL_v1 + NM_v1 + NH_v1 + SL_v1 + SM_v1 + SH_v1 != 0, 1, 0),
+         infested_v2 = ifelse(NL_v2 + NM_v2 + NH_v2 + SL_v2 + SM_v2 + SH_v2 != 0, 1, 0),
+         infested_v3 = ifelse(NL_v3 + NM_v3 + NH_v3 + SL_v3 + SM_v3 + SH_v3 != 0, 1, 0),
+         infested_v4 = ifelse(NL_v4 + NM_v4 + NH_v4 + SL_v4 + SM_v4 + SH_v4 != 0, 1, 0))
+
+
+all_trees <- all_trees[!is.na(all_trees$Longitude.focal),] # get rid of NAs
+
+
+# convert to UTM to get nice "square" plots
+xy = data.frame(all_trees$Longitude.focal, all_trees$Latitude.focal)
+#xy <- xy[!is.na(xy$all_trees.Longitude),] # Get rid of NAs
+coordinates(xy) <- c("all_trees.Longitude.focal", "all_trees.Latitude.focal")
+proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")
+NE <- spTransform(xy, CRS("+proj=utm +zone=12 ellps=WGS84"))
+NE <- as.data.frame(NE)
+
+all_trees$Longitude.focal <- NE$coords.x1
+all_trees$Latitude.focal <- NE$coords.x2
+
+#Marks for status - we'll do marks for non-hosts and then hosts with and w/o infestation
+all_trees$infested_v1 = as.factor(all_trees$infested_v1)
+all_trees$infested_v2 = as.factor(all_trees$infested_v2)
+all_trees$infested_v3 = as.factor(all_trees$infested_v3)
+all_trees$infested_v4 = as.factor(all_trees$infested_v4)
+all_trees <- all_trees %>% mutate(host = ifelse(species == "abla" | species == "abco", 1, 0))
+all_trees$host <- as.factor(all_trees$host)
+
+all_trees <- all_trees %>%
+  mutate(marks_v1 = case_when(
+    infested_v1 == 1 ~ factor("I"),
+    infested_v1 == 0 ~ factor("N")),
+    
+    marks_v2 = case_when(
+    infested_v2 == 1 ~ factor("I"),
+    infested_v2 == 0 ~ factor("N")),
+    
+    marks_v3 = case_when(
+    infested_v3 == 1 ~ factor("I"),
+    infested_v3 == 0 ~ factor("N")),
+    
+    marks_v4 = case_when(
+    infested_v4 == 1 ~ factor("I"),
+    infested_v4 == 0 ~ factor("N")))
+
+
+cxsp <- all_trees %>% dplyr::filter(site == "CXSP")
+emig <- all_trees %>% dplyr::filter(site == "EMIG")
+frnk <- all_trees %>% dplyr::filter(site == "FRNK")
+mocr <- all_trees %>% dplyr::filter(site == "MOCR")
+mttp <- all_trees %>% dplyr::filter(site == "MTTP")
+smmh <- all_trees %>% dplyr::filter(site == "SMMH")
+soap <- all_trees %>% dplyr::filter(site == "SOAP")
+tmpf <- all_trees %>% dplyr::filter(site == "TMPF")
+
+
+
+# repeat for all plots
+cxsp$plot_x <- scale_coordinates(cxsp$Longitude.focal, 0, 50)
+cxsp$plot_y <- scale_coordinates(cxsp$Latitude.focal, 0, 50)
+
+emig$plot_x <- scale_coordinates(emig$Longitude.focal, 0, 50)
+emig$plot_y <- scale_coordinates(emig$Latitude.focal, 0, 50)
+
+frnk$plot_x <- scale_coordinates(frnk$Longitude.focal, 0, 50)
+frnk$plot_y <- scale_coordinates(frnk$Latitude.focal, 0, 50)
+
+mocr$plot_x <- scale_coordinates(mocr$Longitude.focal, 0, 50)
+mocr$plot_y <- scale_coordinates(mocr$Latitude.focal, 0, 50)
+
+mttp$plot_x <- scale_coordinates(mttp$Longitude.focal, 0, 50)
+mttp$plot_y <- scale_coordinates(mttp$Latitude.focal, 0, 50)
+
+smmh$plot_x <- scale_coordinates(smmh$Longitude.focal, 0, 50)
+smmh$plot_y <- scale_coordinates(smmh$Latitude.focal, 0, 50)
+
+soap$plot_x <- scale_coordinates(soap$Longitude.focal, 0, 50)
+soap$plot_y <- scale_coordinates(soap$Latitude.focal, 0, 50)
+
+tmpf$plot_x <- scale_coordinates(tmpf$Longitude.focal, 0, 50)
+tmpf$plot_y <- scale_coordinates(tmpf$Latitude.focal, 0, 50)
+
+```
+
+# Cox Srings - Infested vs NOn-infested - All Visits
+
+```{r}
+# ppp objects for each visit
+cxsp.ppp.v1 <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v1)
+cxsp.ppp.v2 <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v2)
+cxsp.ppp.v3 <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v3)
+cxsp.ppp.v4 <- ppp(cxsp$plot_x, cxsp$plot_y, window = window, marks = cxsp$marks_v4)
+
+# Infested - Non-infested
+cxsp_inf_non_v1 <- envelope(Y=cxsp.ppp.v1[cxsp.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp.v1)[rlabel(cxsp.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+cxsp_inf_non_v2 <- envelope(Y=cxsp.ppp.v2[cxsp.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp.v2)[rlabel(cxsp.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+cxsp_inf_non_v3 <- envelope(Y=cxsp.ppp.v3[cxsp.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp.v3)[rlabel(cxsp.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+cxsp_inf_non_v4 <- envelope(Y=cxsp.ppp.v4[cxsp.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(cxsp.ppp.v4)[rlabel(cxsp.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(cxsp_inf_non_v1)
+plot(cxsp_inf_non_v2)
+plot(cxsp_inf_non_v3)
+plot(cxsp_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.cxsp.v1 <- envelope(cxsp.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v1)))
+
+Lmulti.cxsp.v2 <- envelope(cxsp.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v2)))
+
+Lmulti.cxsp.v3 <- envelope(cxsp.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v3)))
+
+Lmulti.cxsp.v4 <- envelope(cxsp.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v4)))
+
+plot(Lmulti.cxsp.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 1")
+plot(Lmulti.cxsp.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 2")
+plot(Lmulti.cxsp.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 3")
+plot(Lmulti.cxsp.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 4")
+
+```
+
+# Emigration Canyon - all visits
+
+```{r}
+# ppp objects for each visit
+emig.ppp.v1 <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v1)
+emig.ppp.v2 <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v2)
+emig.ppp.v3 <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v3)
+emig.ppp.v4 <- ppp(emig$plot_x, emig$plot_y, window = window, marks = emig$marks_v4)
+
+# Infested - Non-infested
+emig_inf_non_v1 <- envelope(Y=emig.ppp.v1[emig.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp.v1)[rlabel(emig.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+emig_inf_non_v2 <- envelope(Y=emig.ppp.v2[emig.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp.v2)[rlabel(emig.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+emig_inf_non_v3 <- envelope(Y=emig.ppp.v3[emig.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp.v3)[rlabel(emig.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+emig_inf_non_v4 <- envelope(Y=emig.ppp.v4[emig.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(emig.ppp.v4)[rlabel(emig.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(emig_inf_non_v1)
+plot(emig_inf_non_v2)
+plot(emig_inf_non_v3)
+plot(emig_inf_non_v4)
+
+# Bivariate PCF
+
+plot(Lmulti.emig.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF")
+
+Lmulti.emig.v1 <- envelope(emig.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v1)))
+
+Lmulti.emig.v2 <- envelope(emig.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v2)))
+
+Lmulti.emig.v3 <- envelope(emig.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v3)))
+
+Lmulti.emig.v4 <- envelope(emig.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v4)))
+
+plot(Lmulti.emig.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 1")
+plot(Lmulti.emig.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 2")
+plot(Lmulti.emig.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 3")
+plot(Lmulti.emig.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 4")
+
+```
+
+# Franklin Basin - all visits
+
+```{r}
+# ppp objects for each visit
+frnk.ppp.v1 <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v1)
+frnk.ppp.v2 <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v2)
+frnk.ppp.v3 <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v3)
+frnk.ppp.v4 <- ppp(frnk$plot_x, frnk$plot_y, window = window, marks = frnk$marks_v4)
+
+# Infested - Non-infested
+frnk_inf_non_v1 <- envelope(Y=frnk.ppp.v1[frnk.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp.v1)[rlabel(frnk.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+frnk_inf_non_v2 <- envelope(Y=frnk.ppp.v2[frnk.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp.v2)[rlabel(frnk.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+frnk_inf_non_v3 <- envelope(Y=frnk.ppp.v3[frnk.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp.v3)[rlabel(frnk.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+frnk_inf_non_v4 <- envelope(Y=frnk.ppp.v4[frnk.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(frnk.ppp.v4)[rlabel(frnk.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(frnk_inf_non_v1)
+plot(frnk_inf_non_v2)
+plot(frnk_inf_non_v3)
+plot(frnk_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.frnk.v1 <- envelope(frnk.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v1)))
+
+Lmulti.frnk.v2 <- envelope(frnk.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v2)))
+
+Lmulti.frnk.v3 <- envelope(frnk.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v3)))
+
+Lmulti.frnk.v4 <- envelope(frnk.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v4)))
+
+plot(Lmulti.frnk.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 1")
+plot(Lmulti.frnk.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 2")
+plot(Lmulti.frnk.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 3")
+plot(Lmulti.frnk.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 4")
+
+```
+
+# Monte Cristo - all visits - need to re-do coordinates with new coordinates!!!
+
+```{r}
+# ppp objects for each visit
+mocr.ppp.v1 <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v1)
+mocr.ppp.v2 <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v2)
+mocr.ppp.v3 <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v3)
+mocr.ppp.v4 <- ppp(mocr$plot_x, mocr$plot_y, window = window, marks = mocr$marks_v4)
+
+# Infested - Non-infested
+mocr_inf_non_v1 <- envelope(Y=mocr.ppp.v1[mocr.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp.v1)[rlabel(mocr.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+mocr_inf_non_v2 <- envelope(Y=mocr.ppp.v2[mocr.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp.v2)[rlabel(mocr.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+mocr_inf_non_v3 <- envelope(Y=mocr.ppp.v3[mocr.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp.v3)[rlabel(mocr.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+mocr_inf_non_v4 <- envelope(Y=mocr.ppp.v4[mocr.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mocr.ppp.v4)[rlabel(mocr.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(mocr_inf_non_v1)
+plot(mocr_inf_non_v2)
+plot(mocr_inf_non_v3)
+plot(mocr_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.mocr.v1 <- envelope(mocr.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v1)))
+
+Lmulti.mocr.v2 <- envelope(mocr.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v2)))
+
+Lmulti.mocr.v3 <- envelope(mocr.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v3)))
+
+Lmulti.mocr.v4 <- envelope(mocr.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v4)))
+
+plot(Lmulti.mocr.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 1")
+plot(Lmulti.mocr.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 2")
+plot(Lmulti.mocr.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 3")
+plot(Lmulti.mocr.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 4")
+
+```
+
+# Mount Timp - all visits
+
+```{r}
+# ppp objects for each visit
+mttp.ppp.v1 <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v1)
+mttp.ppp.v2 <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v2)
+mttp.ppp.v3 <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v3)
+mttp.ppp.v4 <- ppp(mttp$plot_x, mttp$plot_y, window = window, marks = mttp$marks_v4)
+
+# Infested - Non-infested
+mttp_inf_non_v1 <- envelope(Y=mttp.ppp.v1[mttp.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp.v1)[rlabel(mttp.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+mttp_inf_non_v2 <- envelope(Y=mttp.ppp.v2[mttp.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp.v2)[rlabel(mttp.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+mttp_inf_non_v3 <- envelope(Y=mttp.ppp.v3[mttp.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp.v3)[rlabel(mttp.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+mttp_inf_non_v4 <- envelope(Y=mttp.ppp.v4[mttp.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(mttp.ppp.v4)[rlabel(mttp.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(mttp_inf_non_v1)
+plot(mttp_inf_non_v2)
+plot(mttp_inf_non_v3)
+plot(mttp_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.mttp.v1 <- envelope(mttp.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v1)))
+
+Lmulti.mttp.v2 <- envelope(mttp.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v2)))
+
+Lmulti.mttp.v3 <- envelope(mttp.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v3)))
+
+Lmulti.mttp.v4 <- envelope(mttp.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v4)))
+
+plot(Lmulti.mttp.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 1")
+plot(Lmulti.mttp.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 2")
+plot(Lmulti.mttp.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 3")
+plot(Lmulti.mttp.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 4")
+
+```
+
+# Soapstone - all visits
+
+```{r}
+# ppp objects for each visit
+soap.ppp.v1 <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v1)
+soap.ppp.v2 <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v2)
+soap.ppp.v3 <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v3)
+soap.ppp.v4 <- ppp(soap$plot_x, soap$plot_y, window = window, marks = soap$marks_v4)
+
+# Infested - Non-infested
+soap_inf_non_v1 <- envelope(Y=soap.ppp.v1[soap.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp.v1)[rlabel(soap.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+soap_inf_non_v2 <- envelope(Y=soap.ppp.v2[soap.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp.v2)[rlabel(soap.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+soap_inf_non_v3 <- envelope(Y=soap.ppp.v3[soap.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp.v3)[rlabel(soap.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+soap_inf_non_v4 <- envelope(Y=soap.ppp.v4[soap.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(soap.ppp.v4)[rlabel(soap.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(soap_inf_non_v1)
+plot(soap_inf_non_v2)
+plot(soap_inf_non_v3)
+plot(soap_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.soap.v1 <- envelope(soap.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v1)))
+
+Lmulti.soap.v2 <- envelope(soap.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v2)))
+
+Lmulti.soap.v3 <- envelope(soap.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v3)))
+
+Lmulti.soap.v4 <- envelope(soap.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v4)))
+
+plot(Lmulti.soap.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 1")
+plot(Lmulti.soap.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 2")
+plot(Lmulti.soap.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 3")
+plot(Lmulti.soap.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 4")
+
+```
+
+# Smith and Morehouse - all visits
+
+```{r}
+# ppp objects for each visit
+smmh.ppp.v1 <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v1)
+smmh.ppp.v2 <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v2)
+smmh.ppp.v3 <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v3)
+smmh.ppp.v4 <- ppp(smmh$plot_x, smmh$plot_y, window = window, marks = smmh$marks_v4)
+
+# Infested - Non-infested
+smmh_inf_non_v1 <- envelope(Y=smmh.ppp.v1[smmh.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp.v1)[rlabel(smmh.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+smmh_inf_non_v2 <- envelope(Y=smmh.ppp.v2[smmh.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp.v2)[rlabel(smmh.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+smmh_inf_non_v3 <- envelope(Y=smmh.ppp.v3[smmh.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp.v3)[rlabel(smmh.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+smmh_inf_non_v4 <- envelope(Y=smmh.ppp.v4[smmh.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(smmh.ppp.v4)[rlabel(smmh.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(smmh_inf_non_v1)
+plot(smmh_inf_non_v2)
+plot(smmh_inf_non_v3)
+plot(smmh_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.smmh.v1 <- envelope(smmh.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v1)))
+
+Lmulti.smmh.v2 <- envelope(smmh.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v2)))
+
+Lmulti.smmh.v3 <- envelope(smmh.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v3)))
+
+Lmulti.smmh.v4 <- envelope(smmh.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v4)))
+
+plot(Lmulti.smmh.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 1")
+plot(Lmulti.smmh.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 2")
+plot(Lmulti.smmh.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 3")
+plot(Lmulti.smmh.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 4")
+
+```
+
+# Temple Fork - all visits
+
+```{r}
+# ppp objects for each visit
+tmpf.ppp.v1 <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v1)
+tmpf.ppp.v2 <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v2)
+tmpf.ppp.v3 <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v3)
+tmpf.ppp.v4 <- ppp(tmpf$plot_x, tmpf$plot_y, window = window, marks = tmpf$marks_v4)
+
+# Infested - Non-infested
+tmpf_inf_non_v1 <- envelope(Y=tmpf.ppp.v1[tmpf.ppp.v1$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp.v1)[rlabel(tmpf.ppp.v1)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+tmpf_inf_non_v2 <- envelope(Y=tmpf.ppp.v2[tmpf.ppp.v2$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp.v2)[rlabel(tmpf.ppp.v2)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+tmpf_inf_non_v3 <- envelope(Y=tmpf.ppp.v3[tmpf.ppp.v3$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp.v3)[rlabel(tmpf.ppp.v3)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+
+# Infested - Non-infested
+tmpf_inf_non_v4 <- envelope(Y=tmpf.ppp.v4[tmpf.ppp.v4$marks=='I'],fun=pcfinhom, r=seq(0,50,.5), nsim=99,
+                      simulate=expression((rlabel(tmpf.ppp.v4)[rlabel(tmpf.ppp.v4)$marks=='N'])),
+                      savepatterns = TRUE, savefuns = TRUE,divisor = 'd')
+
+plot(tmpf_inf_non_v1)
+plot(tmpf_inf_non_v2)
+plot(tmpf_inf_non_v3)
+plot(tmpf_inf_non_v4)
+
+# Bivariate PCF
+
+Lmulti.tmpf.v1 <- envelope(tmpf.ppp.v1, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v1)))
+
+Lmulti.tmpf.v2 <- envelope(tmpf.ppp.v2, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v2)))
+
+Lmulti.tmpf.v3 <- envelope(tmpf.ppp.v3, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v3)))
+
+Lmulti.tmpf.v4 <- envelope(tmpf.ppp.v4, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v4)))
+
+plot(Lmulti.tmpf.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 1")
+plot(Lmulti.tmpf.v2,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 2")
+plot(Lmulti.tmpf.v3,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 3")
+plot(Lmulti.tmpf.v4,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 4")
+
+```
+
+# New infested at visits 2,3 and 4
+
+```{r}
+ppp_pcf_v2 <- function(i) {
+obj_name <- deparse(substitute(i))
+i.ppp <- ppp(i$plot_x, i$plot_y, window = window, marks = i$marks_new_v2)
+i.pcf <- pcfinhom(i.ppp, r = 0:20, nsim =3)
+assign(paste0(obj_name, ".ppp.v2.new"), i.ppp, envir = .GlobalEnv)
+assign(paste0(obj_name, ".pcf.v2.new"), i.pcf, envir = .GlobalEnv)
+plot(i.pcf)
+}
+ppp_pcf_v3 <- function(i) {
+obj_name <- deparse(substitute(i))
+i.ppp <- ppp(i$plot_x, i$plot_y, window = window, marks = i$marks_new_v3)
+i.pcf <- pcfinhom(i.ppp, r = 0:20, nsim =3)
+assign(paste0(obj_name, ".ppp.v3.new"), i.ppp, envir = .GlobalEnv)
+assign(paste0(obj_name, ".pcf.v3.new"), i.pcf, envir = .GlobalEnv)
+plot(i.pcf)
+}
+ppp_pcf_v4 <- function(i) {
+obj_name <- deparse(substitute(i))
+i.ppp <- ppp(i$plot_x, i$plot_y, window = window, marks = i$marks_new_v4)
+i.pcf <- pcfinhom(i.ppp, r = 0:20, nsim =3)
+assign(paste0(obj_name, ".ppp.v4.new"), i.ppp, envir = .GlobalEnv)
+assign(paste0(obj_name, ".pcf.v4.new"), i.pcf, envir = .GlobalEnv)
+plot(i.pcf)
+}
+
+ppp_pcf_v2(cxsp)
+ppp_pcf_v2(emig)
+ppp_pcf_v2(frnk)
+ppp_pcf_v2(mocr)
+ppp_pcf_v2(mttp)
+ppp_pcf_v2(smmh)
+ppp_pcf_v2(soap)
+ppp_pcf_v2(tmpf)
+ppp_pcf_v3(cxsp)
+ppp_pcf_v3(emig)
+ppp_pcf_v3(frnk)
+ppp_pcf_v3(mocr)
+ppp_pcf_v3(mttp)
+ppp_pcf_v3(smmh)
+ppp_pcf_v3(soap)
+ppp_pcf_v3(tmpf)
+ppp_pcf_v4(cxsp)
+ppp_pcf_v4(emig)
+ppp_pcf_v4(frnk)
+ppp_pcf_v4(mocr)
+ppp_pcf_v4(mttp)
+ppp_pcf_v4(smmh)
+ppp_pcf_v4(soap)
+ppp_pcf_v4(tmpf)
+
+```
+
+# Cox Springs - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.cxsp.v2.new <- envelope(cxsp.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v2.new)))
+
+Lmulti.cxsp.v3.new <- envelope(cxsp.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v3.new)))
+
+Lmulti.cxsp.v4.new <- envelope(cxsp.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(cxsp.ppp.v4.new)))
+
+
+plot(Lmulti.cxsp.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 2 - new infestations vs all other trees")
+plot(Lmulti.cxsp.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.cxsp.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Emigration Canyon - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.emig.v2.new <- envelope(emig.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v2.new)))
+
+#Lmulti.emig.v3.new <- envelope(emig.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v3.new))) - no new infestations on this visit
+
+Lmulti.emig.v4.new <- envelope(emig.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(emig.ppp.v4.new)))
+
+
+plot(Lmulti.emig.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 2 - new infestations vs all other trees")
+#plot(Lmulti.emig.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.emig.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Franklin Basin - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.frnk.v2.new <- envelope(frnk.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v2.new)))
+
+#Lmulti.frnk.v3.new <- envelope(frnk.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v3.new))) - no new infestations
+
+Lmulti.frnk.v4.new <- envelope(frnk.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(frnk.ppp.v4.new)))
+
+
+plot(Lmulti.frnk.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 2 - new infestations vs all other trees")
+#plot(Lmulti.frnk.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.frnk.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Monte Cristo - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.mocr.v2.new <- envelope(mocr.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v2.new)))
+
+Lmulti.mocr.v3.new <- envelope(mocr.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v3.new)))
+
+Lmulti.mocr.v4.new <- envelope(mocr.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mocr.ppp.v4.new)))
+
+
+plot(Lmulti.mocr.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 2 - new infestations vs all other trees")
+plot(Lmulti.mocr.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.mocr.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Mount Timpanogos - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.mttp.v2.new <- envelope(mttp.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v2.new)))
+
+Lmulti.mttp.v3.new <- envelope(mttp.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v3.new)))
+
+Lmulti.mttp.v4.new <- envelope(mttp.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(mttp.ppp.v4.new)))
+
+
+plot(Lmulti.mttp.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 2 - new infestations vs all other trees")
+plot(Lmulti.mttp.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.mttp.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Smith and Morehouse - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.smmh.v2.new <- envelope(smmh.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v2.new)))
+
+Lmulti.smmh.v3.new <- envelope(smmh.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v3.new)))
+
+Lmulti.smmh.v4.new <- envelope(smmh.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(smmh.ppp.v4.new)))
+
+
+plot(Lmulti.smmh.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 2 - new infestations vs all other trees")
+plot(Lmulti.smmh.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.smmh.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Soapstone Basin - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.soap.v2.new <- envelope(soap.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v2.new)))
+
+Lmulti.soap.v3.new <- envelope(soap.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v3.new)))
+
+Lmulti.soap.v4.new <- envelope(soap.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(soap.ppp.v4.new)))
+
+
+plot(Lmulti.soap.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 2 - new infestations vs all other trees")
+plot(Lmulti.soap.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.soap.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Temple Fork - New infestations vs trees that stayed uninfested
+
+```{r}
+# Bivariate PCF
+
+Lmulti.tmpf.v2.new <- envelope(tmpf.ppp.v2.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v2.new)))
+
+Lmulti.tmpf.v3.new <- envelope(tmpf.ppp.v3.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v3.new)))
+
+Lmulti.tmpf.v4.new <- envelope(tmpf.ppp.v4.new, Lcross, nsim = 999, rank = 1, i = "I", global = FALSE, simulate = expression(rlabel(tmpf.ppp.v4.new)))
+
+
+plot(Lmulti.tmpf.v2.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 2 - new infestations vs all other trees")
+plot(Lmulti.tmpf.v3.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 3 - new infestations vs all other trees")
+plot(Lmulti.tmpf.v4.new,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF - visit 4 - new infestations vs all other trees")
+
+```
+
+# Visualizations for each visit
+
+```{r}
+
+data_long <- all_trees %>%
+  pivot_longer(
+    cols = ends_with("_v1") | ends_with("_v2") | ends_with("_v3") | ends_with("_v4"),  # columns with visit data
+    names_to = c(".value", "visit"),       # use ".value" to keep the original variable name
+    names_pattern = "(.*)_(v[0-9])"        # regex to separate variable name and visit
+  ) %>%
+  mutate(visit = as.numeric(gsub("v", "", visit))) 
+
+trees <- data_long
+
+trees <- trees %>%
+  arrange(plot_x, plot_y, visit) %>%  # Ensure the data is ordered by tree coordinates and visit
+  group_by(plot_x, plot_y) %>%        # Group by unique trees (using coordinates)
+  mutate(
+    ever_infestation = cumsum(marks == "I") > 0,  # Tracks if the tree was ever infested
+    new_infestation = (marks == "I" & lag(ever_infestation, default = FALSE) == FALSE)  # First time "I"
+  ) %>%
+  ungroup()
+
+cxsp_long <- trees %>% filter(site == "CXSP")
+
+# Filter for first-time infested trees
+first_time_data <- cxsp_long %>% filter(new_infestation == TRUE)
+
+# Previously infested trees
+prev_data <- cxsp_long %>% filter(marks == "I" & new_infestation == FALSE)
+
+ggplot() +
+  # Previously infested trees in light red
+  geom_point(
+    data = prev_data,
+    aes(x = plot_x, y = plot_y),
+    color = "lightcoral",
+    alpha = 0.5, # Light transparency
+    size = 2
+  ) +
+  # First-time infested trees in red
+  geom_point(
+    data = first_time_data,
+    aes(x = plot_x, y = plot_y),
+    color = "red",
+    size = 2
+  ) +
+  labs(
+    title = "First-Time Infestation by Visit",
+    x = "X Coordinate",
+    y = "Y Coordinate"
+  ) +
+  facet_wrap(~visit) + # Separate plots for each visit
+  theme_minimal()
+
+# Cox Springs - visit 1
+ggplot(cxsp, aes(x = plot_x, y = plot_y, color = marks_v1)) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("I" = "red", "N" = "green")
+  ) +
+  labs(
+    title = "Cox Springs - Visit 1",
+    x = "plot_x",
+    y = "plot_y",
+    color = "Infestation and Host status"
+  ) +
+  theme_minimal()
+
+# Cox Springs - visit 2
+
+# make new category with infestations from visit one and new infestations on visit 2
+cxsp$new_v2 <- ifelse(cxsp$marks_v1 == "I", "I_v1",
+                             ifelse(cxsp$marks_new_v2 == "I", "I_v2", 
+                              ifelse(cxsp$marks_new_v2 == "N", "N", NA)))
+
+ggplot(cxsp, aes(x = plot_x, y = plot_y, color = new_v2)) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("I_v1" = "lightcoral", "I_v1" = "red", "N" = "green")
+  ) +
+  labs(
+    title = "Cox Springs - Visit 2",
+    x = "plot_x",
+    y = "plot_y",
+    color = "Infestation and Host status"
+  ) +
+  theme_minimal()
+```

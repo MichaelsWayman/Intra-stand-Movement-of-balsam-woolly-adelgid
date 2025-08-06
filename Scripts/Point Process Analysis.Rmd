@@ -1,0 +1,946 @@
+---
+title: "Point Processes Redux"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Point Processes again
+2/8/24
+Michael Wayman
+
+The purpose of this script is to look at point processes using Rob Fletcher and Marie-Josie Fortin's Spatial Ecology and Conservation Modeling book. We want to get spatial statistics for our sites using marked models as well as including edge effects. Let's get to it!
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# clean out environment
+
+```{r}
+rm(list = ls())
+
+```
+
+# Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+library(lme4) # to use glmer
+
+```
+
+# Load data
+
+```{r}
+
+trees <- read_xlsx("data_with_nearest_info.xlsx")
+
+all_trees <- read_xlsx("trees_for_spatial_tests.xlsx")
+
+```
+
+# Coordinate conversion
+
+We need to convert our coordinates to get results in an interpretable format
+
+```{r}
+
+# library(sp)
+# xy = data.frame(trees$Longitude.focal, trees$Latitude.focal)
+# coordinates(xy) <- c("trees.Longitude.focal", "trees.Latitude.focal")
+# proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")
+# NE <- spTransform(xy, CRS("+proj=utm +zone=12 ellps=WGS84"))
+# NE <- as.data.frame(NE)
+# 
+# trees$Longitude.focal <- NE$coords.x1
+# trees$Latitude.focal <- NE$coords.x2
+
+```
+
+# Combine non-host with host - leaving this out for first run !!
+
+# ```{r}
+# 
+# # get rid of abla in points
+# non_host_points_cxsp <- head(cxsp_points, 257)
+# non_host_points_cxsp <- non_host_points_cxsp[-10,] # run twice to get rid of 10 and 11
+# non_host_points_cxsp$site <- "CXSP" # add site for combination
+# names(non_host_points_cxsp)[2] <- "Latitude.focal" # change names for combination
+# names(non_host_points_cxsp)[3] <- "Longitude.focal"
+# non_host_points_cxsp$Species <- str_sub(non_host_points_cxsp$Name, start = 1, end = 4) %>% stringr::str_to_upper() # Make species name for later
+# 
+# cxsp <- bind_rows(cxsp, non_host_points_cxsp) # add together
+# 
+# ```
+
+# Create necessary objects
+
+# IMPORTANT CAVEAT !!!!
+
+- We'll need to get points for our corners to use any of the indices created from these point patterns to make it standardized. At the moment, we are just changing bounds to include all of our points, which will not reflect reality since we are considering edge effects.
+
+```{r}
+
+
+
+cxsp <- all_trees %>% dplyr::filter(all_trees$site == "CXSP")
+# change names for combination with non-host
+cxsp$Name <- as.character(cxsp$Name)
+
+cxsp_points <- read_xlsx("cxsp_points.xlsx")
+
+#ppp.window_cxsp <- owin(xrange = c(41.641, 41.6416), yrange = c(-111.4924, -111.4917))
+
+#ppp.cxsp <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window_cxsp)
+
+# minimun window
+
+ppp.window_cxsp.min <- owin(xrange = c(min(cxsp$Latitude.focal), max(cxsp$Latitude.focal)), yrange = c(min(cxsp$Longitude.focal), max(cxsp$Longitude.focal)))
+
+ppp.cxsp.min <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window_cxsp.min)
+
+plot(ppp.cxsp.min)
+summary(ppp.cxsp.min)
+
+ggplot(cxsp, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+
+## Quadrat counts and test
+
+```{r}
+q <- quadratcount(ppp.cxsp.min, nx = 5, ny = 5) # 10x10m quadrats
+plot(ppp.cxsp.min)
+plot(q)
+quadrat.test(ppp.cxsp.min, nx = 5, ny = 5, method = "Chisq")
+```
+
+## Ripley's K and L functions
+
+```{r}
+
+knone <- Kest(ppp.cxsp.min, correction = "none") # no edge effect correction
+plot(knone)
+
+lnone <- Lest(ppp.cxsp.min, correction = "none")
+plot(lnone) # standardized to 1:1 expectation
+plot(lnone, .-r~r) # standardized to zero expectation
+```
+
+## With weights
+
+```{r}
+Liso <- Lest(ppp.cxsp.min, correction = "isotropic") # weights points at edge
+plot(Liso, .-r~r)
+
+Ltrans <- Lest(ppp.cxsp.min, correction = "translate") # pacman edge correction
+plot(Ltrans, .-r~r)
+
+```
+
+## Monte Carlo simulations
+
+```{r}
+Lcsr <- envelope(ppp.cxsp.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F)
+
+```
+# Estimate g
+
+This uses a "ring" instead of a circle using r (radius)
+
+```{r}
+Ptrans <- pcf(ppp.cxsp.min, correction = "translate")
+plot(Ptrans)
+
+Penv <- envelope(ppp.cxsp.min, pcf, nsim = 999, rank = 1, correction = "translate", global = FALSE)
+plot(Penv, shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+
+```{r}
+Gtrans = Gest(ppp.cxsp.min, correction = "rs") # reduced sample correction
+plot(Gtrans, legend = F)
+
+Genv <- envelope(ppp.cxsp.min, Gest, nsim = 999, rank = 1, correction = "rs", global = FALSE) # utilizes nearest neighbor distances so r tends to be a lot smaller in these plots
+plot(Genv, shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+# General conclusion (Second-order Univariate Point Pattern Analysis)
+
+From these graphs, we see that overall for just the distribution of trees at Cox Spring, we are seeing distribution of trees that are more aggregated than random for all distances and that there is not a random distribution at any scale. This is to be expected. When we move to a marked design, we hope to see more interesting results
+
+# Marked Point Pattern
+
+```{r}
+cxsp$infestation_visit_1[is.na(cxsp$infestation_visit_1)] <- 0 # change NA's to 0
+cxsp$infestedPA <- as.factor(ifelse(cxsp$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window_cxsp.min, marks = cxsp$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA) # summary stats by mark
+plot(split(ppp.PA)) # plots of presence/absence
+
+```
+
+# Infestation ignoring host distribution
+
+```{r}
+
+infest_data <- subset(cxsp, infestation_visit_1 > 0)
+#ppp.bug <- ppp(infest_data$Latitude.focal, infest_data$Longitude.focal, window = ppp.window_cxsp)
+
+#Lbug <- envelope(ppp.bug, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# minimum window
+ppp.PA.cxsp.min <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window_cxsp.min, marks = cxsp$infestedPA)
+
+Lmulti.cxsp.min <- envelope(ppp.PA.cxsp.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.cxsp.min)))
+
+plot(Lmulti.cxsp.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+Kmulti.cxsp.min <- envelope(ppp.PA.cxsp.min, Kcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.cxsp.min)))
+
+plot(Kmulti.cxsp.min)
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+Lmulti <- envelope(ppp.PA.cxsp.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.cxsp.min)))
+
+plot(Lmulti,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+# Want to test out getting ride of duplicate points to see if anything changes with the end result - doesn't look too different
+cxsp.nodupe <- cxsp %>% distinct(Latitude.focal, .keep_all = TRUE)
+
+
+ppp.window_cxsp.min.nodupe <- owin(xrange = c(min(cxsp.nodupe$Latitude.focal), max(cxsp.nodupe$Latitude.focal)), yrange = c(min(cxsp.nodupe$Longitude.focal), max(cxsp.nodupe$Longitude.focal)))
+
+ppp.cxsp.min.nodupe <- ppp(cxsp.nodupe$Latitude.focal, cxsp.nodupe$Longitude.focal, window = ppp.window_cxsp.min.nodupe)
+
+cxsp.nodupe$infestedPA <- as.factor(ifelse(cxsp.nodupe$infestation_visit_1 > 0, "presence", "absence"))
+
+ppp.PA.cxsp.min.nodupe <- ppp(cxsp.nodupe$Latitude.focal, cxsp.nodupe$Longitude.focal, window = ppp.window_cxsp.min.nodupe, marks = cxsp.nodupe$infestedPA)
+
+Lmulti.cxsp.nodupe <- envelope(ppp.PA.cxsp.min.nodupe, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.cxsp.min.nodupe)))
+
+
+plot(Lmulti.cxsp.nodupe,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Cox Springs Bivariate PCF")
+
+# Infested plotted over infested
+Lmulti.cxsp.nodupe.inf <- envelope(ppp.PA.cxsp.min.nodupe, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.cxsp.min.nodupe)[rlabel(ppp.PA.cxsp.min.nodupe)$marks=='presence']))
+
+plot(Lmulti.cxsp.nodupe.inf)
+
+
+# Trying to compare Bivariate PCF of data 
+
+# original ppp
+cxsp$infestedPA <- as.character(cxsp$infestedPA)
+# cxsp$infestedPA[cxsp$infestedPA == "presence"] <- "I"
+# cxsp$infestedPA[cxsp$infestedPA == "absence"] <- "N"
+cxsp$infestedPA <- as.factor(cxsp$infestedPA)
+cxsp$infestedPA <- relevel(cxsp$infestedPA, "presence")
+ppp.PA.cxsp.min <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window_cxsp.min, marks = cxsp$infestedPA)
+
+Lmulti <- spatstat.explore::envelope(ppp.PA.cxsp.min, Lcross, nsim = 999, rank = 1, i = "absence", j = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.cxsp.min)))
+
+plot(Lmulti,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+# new ppp
+cxsp$marks_v1 <- as.factor(as.character(cxsp$marks_v1))
+ppp.cxsp.min.i <- ppp(cxsp$Latitude.focal, cxsp$Longitude.focal, window = ppp.window_cxsp.min, marks = cxsp$marks_v1)
+
+Lmulti.cxsp.v1 <- spatstat.explore::envelope(ppp.cxsp.min.i, Lcross, nsim = 999, rank = 1, i = "I", j = "N", global = FALSE, simulate = expression(rlabel(ppp.cxsp.min.i)))
+
+plot(Lmulti,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+plot(Lmulti.cxsp.v1,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+```
+
+# EMIG
+
+## point pattern
+
+```{r}
+emig <- all_trees %>% dplyr::filter(all_trees$site == "EMIG")
+# change names for combination with non-host
+emig$Name <- as.character(emig$Name)
+
+#ppp.window_emig <- owin(xrange = c(42.37375, 42.3743), yrange = c(-111.5538, -111.5531))
+
+#ppp.emig <- ppp(emig$Latitude.focal, emig$Longitude.focal, window = ppp.window_emig)
+
+# Minimum window
+ppp.window_emig.min <- owin(xrange = c(min(emig$Latitude.focal), max(emig$Latitude.focal)), yrange = c(min(emig$Longitude.focal), max(emig$Longitude.focal)))
+
+ppp.emig.min <- ppp(emig$Latitude.focal, emig$Longitude.focal, window = ppp.window_emig.min)
+
+#plot(ppp.emig)
+#summary(ppp.emig)
+
+ggplot(emig, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+# Marked Point Pattern
+
+```{r}
+emig$infestation_visit_1[is.na(emig$infestation_visit_1)] <- 0 # change NA's to 0
+emig$infestedPA <- as.factor(ifelse(emig$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA.emig <- ppp(emig$Latitude.focal, emig$Longitude.focal, window = ppp.window_emig.min, marks = emig$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA.emig) # summary stats by mark
+plot(split(ppp.PA.emig)) # plots of presence/absence
+
+#infest_data.emig <- subset(emig, infested > 0)
+#ppp.bug.emig <- ppp(infest_data.emig$Latitude.focal, infest_data.emig$Longitude.focal, window = ppp.window_emig)
+
+#Lbug.emig <- envelope(ppp.bug.emig, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.emig, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# minimum window
+ppp.PA.emig.min <- ppp(emig$Latitude.focal, emig$Longitude.focal, window = ppp.window_emig.min, marks = emig$infestedPA)
+
+Lmulti.emig.min <- envelope(ppp.PA.emig.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.emig.min)))
+
+plot(Lmulti.emig.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Emigration Canyon Bivariate PCF")
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.emig <- envelope(ppp.PA.emig, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.emig)))
+
+#plot(Lmulti.emig,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+# FRNK
+
+## point pattern
+
+```{r}
+
+frnk <- all_trees %>% dplyr::filter(all_trees$site == "FRNK")
+# change names for combination with non-host
+frnk$Name <- as.character(frnk$Name)
+
+#ppp.window_frnk <- owin(xrange = c(41.9334, 41.93386), yrange = c(-111.5718, -111.5711))
+
+#ppp.frnk <- ppp(frnk$Latitude.focal, frnk$Longitude.focal, window = ppp.window_frnk)
+
+# Testing minimun window (ie. different window boundaries)
+ppp.window_frnk.min <- owin(xrange = c(min(frnk$Latitude.focal), max(frnk$Latitude.focal)), yrange = c(min(frnk$Longitude.focal), max(frnk$Longitude.focal)))
+
+ppp.frnk.min <- ppp(frnk$Latitude.focal, frnk$Longitude.focal, window = ppp.window_frnk.min)
+
+plot(ppp.frnk.min)
+summary(ppp.frnk.min)
+
+ggplot(frnk, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+# Marked Point Pattern
+
+```{r}
+frnk$infestation_visit_1[is.na(frnk$infestation_visit_1)] <- 0
+frnk$infestedPA <- as.factor(ifelse(frnk$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA.frnk <- ppp(frnk$Latitude.focal, frnk$Longitude.focal, window = ppp.window_frnk.min, marks = frnk$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA.frnk) # summary stats by mark
+plot(split(ppp.PA.frnk)) # plots of presence/absence
+
+#infest_data.frnk <- subset(frnk, infested > 0)
+#ppp.bug.frnk <- ppp(infest_data.frnk$Latitude.focal, infest_data.frnk$Longitude.focal, window = ppp.window_frnk)
+
+#Lbug.frnk <- envelope(ppp.bug.frnk, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.frnk, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# minimum window
+ppp.PA.frnk.min <- ppp(frnk$Latitude.focal, frnk$Longitude.focal, window = ppp.window_frnk.min, marks = frnk$infestedPA)
+
+Lmulti.frnk.min <- envelope(ppp.PA.frnk.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.frnk.min)))
+
+plot(Lmulti.frnk.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Franklin Basin Bivariate PCF")
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.frnk <- envelope(ppp.PA.frnk, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.frnk)))
+
+#plot(Lmulti.frnk,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+# MOCR
+
+## point pattern
+
+```{r}
+
+mocr <- all_trees %>% dplyr::filter(all_trees$site == "MOCR")
+# change names for combination with non-host
+names(mocr)[1] <- "site"
+names(mocr)[2] <- "Name"
+names(mocr)[3] <- "Species"
+names(mocr)[8] <- "infested"
+mocr$Name <- as.character(mocr$Name)
+
+#ppp.window_mocr <- owin(xrange = c(41.4090, 41.4095), yrange = c(-111.53415, -111.5335))
+
+#ppp.mocr <- ppp(mocr$Latitude.focal, mocr$Longitude.focal, window = ppp.window_mocr)
+
+# Testing minimun window (ie. different window boundaries)
+ppp.window_mocr.min <- owin(xrange = c(min(mocr$Latitude.focal), max(mocr$Latitude.focal)), yrange = c(min(mocr$Longitude.focal), max(mocr$Longitude.focal)))
+
+ppp.mocr.min <- ppp(mocr$Latitude.focal, mocr$Longitude.focal, window = ppp.window_mocr.min)
+
+plot(ppp.mocr.min)
+summary(ppp.mocr.min)
+
+ggplot(mocr, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+# Marked Point Pattern
+
+```{r}
+mocr$infestation_visit_1[is.na(mocr$infestation_visit_1)] <- 0
+mocr$infestedPA <- as.factor(ifelse(mocr$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA.mocr <- ppp(mocr$Latitude.focal, mocr$Longitude.focal, window = ppp.window_mocr.min, marks = mocr$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA.mocr) # summary stats by mark
+plot(split(ppp.PA.mocr)) # plots of presence/absence
+
+plot(split(ppp.PA.mocr)[[2]])
+
+
+
+#infest_data.mocr <- subset(mocr, infested > 0)
+#ppp.bug.mocr <- ppp(infest_data.mocr$Latitude.focal, infest_data.mocr$Longitude.focal, window = ppp.window_mocr)
+
+#Lbug.mocr <- envelope(ppp.bug.mocr, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.mocr, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# minimum window
+ppp.PA.mocr.min <- ppp(mocr$Latitude.focal, mocr$Longitude.focal, window = ppp.window_mocr.min, marks = mocr$infestedPA)
+
+Lmulti.mocr.min <- envelope(ppp.PA.mocr.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.mocr.min)))
+
+plot(Lmulti.mocr.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Monte Cristo Bivariate PCF")
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.mocr <- envelope(ppp.PA.mocr, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.mocr)))
+
+#plot(Lmulti.mocr,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+# MTTP
+
+## point pattern
+
+```{r}
+
+mttp <- all_trees %>% dplyr::filter(all_trees$site == "MTTP")
+# change names for combination with non-host
+names(mttp)[1] <- "site"
+names(mttp)[2] <- "Name"
+names(mttp)[3] <- "Species"
+names(mttp)[8] <- "infested"
+mttp$Name <- as.character(mttp$Name)
+
+#ppp.window_mttp <- owin(xrange = c(40.4347, 40.4352), yrange = c(-111.6393, -111.6386))
+
+#ppp.mttp <- ppp(mttp$Latitude.focal, mttp$Longitude.focal, window = ppp.window_mttp)
+
+# Testing minimun window (ie. different window boundaries)
+ppp.window_mttp.min <- owin(xrange = c(min(mttp$Latitude.focal), max(mttp$Latitude.focal)), yrange = c(min(mttp$Longitude.focal), max(mttp$Longitude.focal)))
+
+ppp.mttp.min <- ppp(mttp$Latitude.focal, mttp$Longitude.focal, window = ppp.window_mttp.min)
+
+plot(ppp.mttp.min)
+summary(ppp.mttp.min)
+
+ggplot(mttp, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+# Marked Point Pattern
+
+```{r}
+mttp$infestation_visit_1[is.na(mttp$infestation_visit_1)] <- 0
+mttp$infestedPA <- as.factor(ifelse(mttp$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA.mttp <- ppp(mttp$Latitude.focal, mttp$Longitude.focal, window = ppp.window_mttp.min, marks = mttp$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA.mttp) # summary stats by mark
+plot(split(ppp.PA.mttp)) # plots of presence/absence
+
+#infest_data.mttp <- subset(mttp, infested > 0)
+#ppp.bug.mttp <- ppp(infest_data.mttp$Latitude.focal, infest_data.mttp$Longitude.focal, window = ppp.window_mttp)
+
+#Lbug.mttp <- envelope(ppp.bug.mttp, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.mttp, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# minimum window
+ppp.PA.mttp.min <- ppp(mttp$Latitude.focal, mttp$Longitude.focal, window = ppp.window_mttp.min, marks = mttp$infestedPA)
+
+Lmulti.mttp.min <- envelope(ppp.PA.mttp.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.mttp.min)))
+
+plot(Lmulti.mttp.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Mount Timpanogos Bivariate PCF")
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.mttp <- envelope(ppp.PA.mttp, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.mttp)))
+
+#plot(Lmulti.mttp,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+# SMMH
+
+## point pattern
+
+```{r}
+
+smmh <- all_trees %>% dplyr::filter(all_trees$site == "SMMH")
+# change names for combination with non-host
+names(smmh)[1] <- "site"
+names(smmh)[2] <- "Name"
+names(smmh)[3] <- "Species"
+names(smmh)[8] <- "infested"
+smmh$Name <- as.character(smmh$Name)
+
+#ppp.window_smmh <- owin(xrange = c(40.7705, 40.77105), yrange = c(-111.10755, -111.1069))
+
+#ppp.smmh <- ppp(smmh$Latitude.focal, smmh$Longitude.focal, window = ppp.window_smmh)
+
+# Testing minimun window (ie. different window boundaries)
+ppp.window_smmh.min <- owin(xrange = c(min(smmh$Latitude.focal), max(smmh$Latitude.focal)), yrange = c(min(smmh$Longitude.focal), max(smmh$Longitude.focal)))
+
+ppp.smmh.min <- ppp(smmh$Latitude.focal, smmh$Longitude.focal, window = ppp.window_smmh.min)
+
+plot(ppp.smmh.min)
+summary(ppp.smmh.min)
+
+ggplot(smmh, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+# Marked Point Pattern
+
+```{r}
+smmh$infestation_visit_1[is.na(smmh$infestation_visit_1)] <- 0
+smmh$infestedPA <- as.factor(ifelse(smmh$infestation_visit_1 > 0, "presence", "absence"))
+#ppp.PA.smmh <- ppp(smmh$Latitude.focal, smmh$Longitude.focal, window = ppp.window_smmh, marks = smmh$infestedPA) # create marked object using infestation presence/absence
+
+ppp.PA.smmh.min <- ppp(smmh$Latitude.focal, smmh$Longitude.focal, window = ppp.window_smmh.min, marks = smmh$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA.smmh.min) # summary stats by mark
+plot(split(ppp.PA.smmh.min)) # plots of presence/absence
+
+#infest_data.smmh <- subset(smmh, infested > 0)
+#ppp.bug.smmh <- ppp(infest_data.smmh$Latitude.focal, infest_data.smmh$Longitude.focal, window = ppp.window_smmh)
+
+#Lbug.smmh <- envelope(ppp.bug.smmh, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.smmh, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.smmh <- envelope(ppp.PA.smmh, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.smmh)))
+
+#plot(Lmulti.smmh,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+Lmulti.smmh.min <- envelope(ppp.PA.smmh.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.smmh.min)))
+
+plot(Lmulti.smmh.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Smith and Morehouse Bivariate PCF")
+
+```
+
+# SOAP
+
+## point pattern
+
+```{r}
+
+soap <- all_trees %>% dplyr::filter(all_trees$site == "SOAP")
+# change names for combination with non-host
+names(soap)[1] <- "site"
+names(soap)[2] <- "Name"
+names(soap)[3] <- "Species"
+names(soap)[8] <- "infested"
+soap$Name <- as.character(soap$Name)
+
+#ppp.window_soap <- owin(xrange = c(40.5453, 40.5458), yrange = c(-111.03, -111.0293))
+
+#ppp.soap <- ppp(soap$Latitude.focal, soap$Longitude.focal, window = ppp.window_soap)
+
+# Testing minimun window (ie. different window boundaries)
+ppp.window_soap.min <- owin(xrange = c(min(soap$Latitude.focal), max(soap$Latitude.focal)), yrange = c(min(soap$Longitude.focal), max(soap$Longitude.focal)))
+
+ppp.soap.min <- ppp(soap$Latitude.focal, soap$Longitude.focal, window = ppp.window_soap.min)
+
+plot(ppp.soap.min)
+summary(ppp.soap.min)
+
+ggplot(soap, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+# Marked Point Pattern
+
+```{r}
+soap$infestation_visit_1[is.na(soap$infestation_visit_1)] <- 0
+soap$infestedPA <- as.factor(ifelse(soap$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA.soap <- ppp(soap$Latitude.focal, soap$Longitude.focal, window = ppp.window_soap.min, marks = soap$infestedPA) # create marked object using infestation presence/absence
+
+# Test minimun window
+ppp.PA.soap.min <- ppp(soap$Latitude.focal, soap$Longitude.focal, window = ppp.window_soap.min, marks = soap$infestedPA)
+
+split(ppp.PA.soap.min) # summary stats by mark
+plot(split(ppp.PA.soap.min)) # plots of presence/absence
+
+#infest_data.soap <- subset(soap, infested > 0)
+#ppp.bug.soap <- ppp(infest_data.soap$Latitude.focal, infest_data.soap$Longitude.focal, window = ppp.window_soap)
+
+#Lbug.soap <- envelope(ppp.bug.soap, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.soap, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.soap <- envelope(ppp.PA.soap, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.soap)))
+
+Lmulti.soap.min <- envelope(ppp.PA.soap.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.soap.min)))
+
+
+#par(mfrow = c(1, 2))
+#plot(Lmulti.soap,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+# Looking for differences in window size
+plot(Lmulti.soap.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Soapstone Basin Bivariate PCF")
+
+
+```
+
+# TMPF
+
+## point pattern
+
+```{r}
+
+tmpf <- all_trees %>% dplyr::filter(all_trees$site == "TMPF")
+# change names for combination with non-host
+names(tmpf)[1] <- "site"
+names(tmpf)[2] <- "Name"
+names(tmpf)[3] <- "Species"
+names(tmpf)[8] <- "infested"
+tmpf$Name <- as.character(tmpf$Name)
+
+ppp.window_tmpf <- owin(xrange = c(40.4347, 40.4352), yrange = c(-111.6393, -111.6386))
+
+ppp.tmpf <- ppp(tmpf$Latitude.focal, tmpf$Longitude.focal, window = ppp.window_tmpf)
+
+ppp.window_tmpf.min <- owin(xrange = c(min(tmpf$Latitude.focal), max(tmpf$Latitude.focal)), yrange = c(min(tmpf$Longitude.focal), max(tmpf$Longitude.focal)))
+
+ppp.tmpf.min <- ppp(tmpf$Latitude.focal, tmpf$Longitude.focal, window = ppp.window_tmpf.min)
+
+plot(ppp.tmpf)
+summary(ppp.tmpf)
+
+ggplot(tmpf, aes(x = Latitude.focal, y = Longitude.focal)) + 
+  geom_point() + coord_fixed()
+```
+
+# Marked Point Pattern
+
+```{r}
+tmpf$infestation_visit_1[is.na(tmpf$infestation_visit_1)] <- 0
+tmpf$infestedPA <- as.factor(ifelse(tmpf$infestation_visit_1 > 0, "presence", "absence"))
+ppp.PA.tmpf <- ppp(tmpf$Latitude.focal, tmpf$Longitude.focal, window = ppp.window_tmpf.min, marks = tmpf$infestedPA) # create marked object using infestation presence/absence
+
+# Test minimun window
+ppp.PA.tmpf.min <- ppp(tmpf$Latitude.focal, tmpf$Longitude.focal, window = ppp.window_tmpf.min, marks = tmpf$infestedPA)
+
+split(ppp.PA.tmpf.min) # summary stats by mark
+plot(split(ppp.PA.tmpf.min)) # plots of presence/absence
+
+#infest_data.tmpf <- subset(tmpf, infested > 0)
+#ppp.bug.tmpf <- ppp(infest_data.tmpf$Latitude.focal, infest_data.tmpf$Longitude.focal, window = ppp.window_tmpf)
+
+#Lbug.tmpf <- envelope(ppp.bug.tmpf, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+#plot(Lbug.tmpf, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+#Lmulti.tmpf <- envelope(ppp.PA.tmpf, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.tmpf)))
+
+Lmulti.tmpf.min <- envelope(ppp.PA.tmpf.min, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.tmpf.min)))
+
+
+#par(mfrow = c(1, 2))
+#plot(Lmulti.tmpf,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+# Looking for differences in window size
+plot(Lmulti.tmpf.min,.-r~r,  shade = c("hi", "lo"), legend = FALSE, main = "Temple Fork Bivariate PCF")
+
+
+```
+
+# Plot all presence plots
+
+```{r}
+
+par(mfrow = c(3, 3),
+  pin = c(1, 1),
+  mar = c(0.25, 0.25, 0.25, 0.25),
+  oma = c(0, 0, 0.5, 0))
+plot(split(ppp.PA.mocr.min)[[2]]) 
+plot(split(ppp.PA.emig.min)[[2]]) 
+plot(split(ppp.PA.mttp.min)[[2]]) 
+plot(split(ppp.PA.frnk.min)[[2]]) 
+plot(split(ppp.PA.smmh.min)[[2]]) 
+plot(split(ppp.PA.soap.min)[[2]]) 
+plot(split(ppp.PA.cxsp.min)[[2]])
+
+
+```
+
+# Marked Point Pattern
+
+```{r}
+tmpf$infestedPA <- as.factor(ifelse(tmpf$infested > 0, "presence", "absence"))
+ppp.PA.tmpf <- ppp(tmpf$Latitude.focal, tmpf$Longitude.focal, window = ppp.window_tmpf, marks = tmpf$infestedPA) # create marked object using infestation presence/absence
+
+split(ppp.PA.tmpf) # summary stats by mark
+plot(split(ppp.PA.tmpf)) # plots of presence/absence
+
+infest_data.tmpf <- subset(tmpf, infested > 0)
+ppp.bug.tmpf <- ppp(infest_data.tmpf$Latitude.focal, infest_data.tmpf$Longitude.focal, window = ppp.window_tmpf)
+
+Lbug.tmpf <- envelope(ppp.bug.tmpf, Lest, nsim = 999, rank = 1, i = "presence", global = F)
+
+plot(Lbug.tmpf, .-r~r, shade = c("hi", "lo"), legend = FALSE)
+
+# bivariate K function (bivariate pair correlation function) - accounting for host distribution
+Lmulti.tmpf <- envelope(ppp.PA.tmpf, Lcross, nsim = 999, rank = 1, i = "presence", global = FALSE, simulate = expression(rlabel(ppp.PA.tmpf)))
+
+plot(Lmulti.tmpf,.-r~r,  shade = c("hi", "lo"), legend = FALSE)
+
+```
+
+# 
+
+# Continuous Marked point pattern
+
+EMIG DBH
+
+We'll do DBH for this example - we may not need this but it'll be nice to see
+
+```{r}
+
+ppp.dbh.emig <- ppp(emig$Latitude.focal, emig$Longitude.focal, window = ppp.window_emig.min, marks = !is.na(emig$DBH_Visit1)) # need to exclude NA's for this, if we want to unclude clumps, we need to give a value
+
+mcf.dbh <- markcorr(ppp.dbh.emig) # mark correlation analysis - Values <1 and outside the envelope indicate negative relationships of patch area with patches r distance away, while values >1 indicate positive relationships
+
+mcfEnv <- envelope(ppp.dbh.emig, markcorr, nsim = 999, correction = "iso", global = FALSE)
+
+plot(mcfEnv, shade = c("hi", "lo"), legend = F)
+
+```
+
+# Alternative null models
+
+The following null models will be Matern cluster process and Thomas cluster process. These processes use "parent" points and "offspring" points with differing distributions. This can simulate seed dispersal, but is this case, we'll look at it like propagule pressure coming from the host tree (or something like that)
+
+- The following plot basically says that we do see an aggregated pattern as expected by one of the previous processes.
+
+```{r}
+
+Kthomas <- kppm(ppp.cxsp.min, ~1, "Thomas")
+summary(Kthomas)
+
+Kthomas.env <- envelope(Kthomas, Lest, nsim = 999, rank = 1, global = F)
+plot(Kthomas.env, .-r~r, shade = c("hi", "lo"), legend = F)
+
+```
+
+# Spatial dependence and autocorrelation
+
+## Correlogram
+
+We're gonna run through this book's version of this and see if it differs from what we did in an earlier RMarkdown
+
+```{r}
+
+#calculate a distance matrix > 
+coords <- cbind(cxsp$Latitude.focal, cxsp$Longitude.focal)  
+colnames(coords) <- c("x", "y") 
+distmat <- as.matrix(dist(coords)) 
+
+#maximum distance to consider in correlogram/variogram
+maxdist <- 2/3 * max(distmat)
+
+# correlog from pgirmess
+library(pgirmess)
+corr <- correlog(coords, cxsp$infested, method = "Moran", nbclass = 14, alternative = "two.sided")
+
+# correlogram plot - don't account for distances past our max dist calculation, which is 42.97
+plot(corr) +
+abline(h=0)
+
+# same thing with ncf package and Monte Carlo sims
+library(ncf)
+corr_ncf <- ncf::correlog(x = cxsp$Latitude.focal, y = cxsp$Longitude.focal, z = cxsp$infested, increment = 5, resamp = 999)
+
+plot(corr_ncf) +
+  abline(h=0)
+
+# Spline correlogram with 95% CI bootstrapping
+spline.corr <- spline.correlog(x = cxsp$Latitude.focal, y = cxsp$Longitude.focal, z = cxsp$infested, xmax = maxdist, resamp = 100, type = "boot")
+
+plot(spline.corr)
+
+# spdep package - this is how we can do binary response or infestation response
+
+# make neighborhood list using queen's rule - 8 neighbors
+neigh <- dnearneigh(x = coords, d1 = 0, d2 = 3, longlat = F)
+
+plot(neigh, coordinates(coords))
+
+# make spatial weights list with row-standardized weights('W')
+wts <- nb2listw(neighbours = neigh, style = 'W', zero.policy = T)
+
+# Monte carlo permutations
+mor.mc <- moran.mc(x = cxsp$infested, listw = wts, nsim = 999, zero.policy = T)
+#moran test
+mor.norm <- moran.test(x = cxsp$infested, listw = wts, randomisation = F, zero.policy = T)
+
+mor.mc
+mor.norm
+
+# dataframe for storage
+corr.sp <- data.frame(dist = seq(5, 0.5 * max(distmat), by = 5), MoransI = NA, Null.LCL = NA, Null.UCL = NA, Pvalue = NA)
+
+# Calculate MOran's I fofr lag distances
+for(i in 1:nrow(corr.sp)) {
+  d.start <- corr.sp[i, "dist"] - 5
+  d.end <- corr.sp[i, "dist"]
+  neigh <- dnearneigh(x = coords, d1 = d.start, d2 = d.end, longlat = F)
+  wts <- nb2listw(neighbours = neigh, style = 'W', zero.policy = T)
+  mor.i <- moran.mc(x = cxsp$infested, listw = wts, nsim = 999, zero.policy = T)
+  
+  # summarize results
+  corr.sp[i, "dist"] <- (d.end + d.start)/2 
+  corr.sp[i, "MoransI"] <- mor.i$statistic 
+  corr.sp[i, "Null.LCL"] <- quantile(mor.i$res, p = 0.025) 
+  corr.sp[i, "Null.UCL"] <- quantile(mor.i$res, p = 0.975) 
+  corr.sp[i, "Pvalue"] <- mor.i$p.value
+}
+plot(y = corr.sp$MoransI, x = corr.sp$dist) +
+  abline(h=0) +
+  lines(corr.sp$dist, corr.sp$Null.LCL, col = "red") +
+  lines(corr.sp$dist, corr.sp$Null.UCL, col = "red")
+```
+
+## Semivariograms
+
+```{r}
+
+library(geoR)
+library(gstat)
+
+# need to feed site data with no duplicated coordinates - looking at DBH to have a continuous data col
+geo.inf <- as.geodata(cxsp.nodupe, coords.col = 68:69, data.col = 8)
+plot(geo.inf)
+
+#Empirical semivariogram > 
+emp.geoR <- variog(geo.inf, max.dist = maxdist)
+plot(emp.geoR) 
+
+#standardize break points to a minimum 3-m lag distance
+emp.geoR <- variog(geo.inf, max.dist = maxdist, breaks = c(seq(0, maxdist, by = 3))) 
+plot(emp.geoR)
+
+#in geoR, variogram in each direction
+emp4.geoR <- variog4(geo.inf, max.dist = maxdist) 
+plot(emp4.geoR)
+legend(4,2)
+
+# Fitting model variograms to the data
+## Exponential
+mlexp <- likfit(geo.inf, cov.model = "exp", ini = c(700, 10))
+
+## Spherical variogram
+mlsph <- likfit(geo.inf, cov.model = "sph", ini = c(700, 10))
+summary(mlexp)
+
+AIC(mlexp, mlsph)
+
+emp.env <- variog.mc.env(geo.inf, obj.var = emp.geoR) 
+plot(emp.geoR, envelope = emp.env) 
+lines(mlexp, col = "blue")
+
+```
+
+# Host Tree Distributions
+
+Let's look at distributions for all sites to see if they are CSR or not
+
+```{r}
+Lcsr.cxsp <- envelope(ppp.cxsp.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr, .-r~r, shade = c("hi", "lo"), legend = F, main = "Cox Spring Host Distribution")
+
+
+Lcsr.emig <- envelope(ppp.emig.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.emig, .-r~r, shade = c("hi", "lo"), legend = F, main = "Emigration Canyon Host Distribution")
+
+Lcsr.frnk <- envelope(ppp.frnk.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.frnk, .-r~r, shade = c("hi", "lo"), legend = F, main = "Franklin Basin Host Distribution")
+
+Lcsr.mocr <- envelope(ppp.mocr.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.mocr, .-r~r, shade = c("hi", "lo"), legend = F, main = "Monte Cristo Host Distribution")
+
+Lcsr.mttp <- envelope(ppp.mttp.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.mttp, .-r~r, shade = c("hi", "lo"), legend = F, main = "Mount Timpanogos Host Distribution")
+
+Lcsr.smmh <- envelope(ppp.smmh.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.smmh, .-r~r, shade = c("hi", "lo"), legend = F, main = "Smith and Morehouse Host Distribution")
+
+Lcsr.soap <- envelope(ppp.soap.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.soap, .-r~r, shade = c("hi", "lo"), legend = F, main = "Soapstone Basin Host Distribution")
+
+Lcsr.tmpf <- envelope(ppp.tmpf.min, Lest, nsim = 999, rank = 1, correction = "translate", global = T) # 999 simulations, alpha = 0.01, "pointwise envelopes". Works better for L than K because of variance stabilizing properties
+plot(Lcsr.tmpf, .-r~r, shade = c("hi", "lo"), legend = F, main = "Temple Fork Host Distribution")
+
+```

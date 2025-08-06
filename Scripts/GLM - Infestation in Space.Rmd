@@ -1,0 +1,81 @@
+---
+title: "GLM - Infestation in Space"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Spatial Indices
+2/22/24
+Michael Wayman
+
+The purpose of this script is to attempt to run through the glm workflow with the intention of creating a glm model that addresses the probability of an individual tree just being infested at all. We'll set up a model for all sites and then proceed to doing each site individually.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+
+```
+
+## Clean out global environment
+
+```{r}
+rm(list = ls())
+```
+
+## Load Data
+
+```{r}
+all_data <- read_xlsx("combined_cleaned.xlsx")
+site_stats <- read_xlsx("site_stats.xlsx")
+data_with_dis <- read_xlsx("data_with_nearest_info.xlsx")
+names(data_with_dis)[8] <- "infested"
+
+```
+
+# Model set up for all sites
+
+```{r}
+
+
+```
+

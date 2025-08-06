@@ -1,0 +1,567 @@
+---
+title: "Throwing things together"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Throwing things together
+11/16/23
+Michael Wayman
+
+The goal of this script is to thikn through some *a priori* hypotheses and see what my data spits out. This may involve several hypotheses we've come up with in the past such as higher density stands will have higher prevalence and rate of spread. In this script, we're mainly looking at two discrete variables that we can test on some or all of the sites. When we find significant trends, we'll note it and possibly work this into the larger models later on.
+
+We really just want to see what kind of variables are standing out in relation to infestation. So I'll preface each chunk with what we're looking at and end each chunk with a note about what we see.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+```
+
+## Clean out global environment
+
+```{r}
+rm(list = ls())
+```
+
+## Load in data
+
+```{r, echo = F, warning=F}
+combined <- read_xlsx("combined_cleaned2.xlsx")
+site_stats <- read_xlsx("site_stats.xlsx")
+```
+
+## Plot change in infestation by section against Density
+
+```{r}
+
+# Add change stats into table
+site_stats$section_change_1_2 <- site_stats$prop_infested_2_by_section - site_stats$prop_infested_1_by_section
+site_stats$section_change_2_3 <- site_stats$prop_infested_3_by_section - site_stats$prop_infested_2_by_section
+site_stats$section_change_3_4 <- site_stats$prop_infested_4_by_section - site_stats$prop_infested_3_by_section
+site_stats$section_change_1_4 <- site_stats$prop_infested_4_by_section - site_stats$prop_infested_1_by_section
+
+site_stats_long <- site_stats %>%
+  pivot_longer(cols = c(section_change_1_2, section_change_2_3, section_change_3_4, section_change_1_4),
+               names_to = "section_change",
+               values_to = "percent_difference")
+
+# Now, create the plot using the reshaped data
+ggplot(site_stats_long, aes(x = SDI, y = percent_difference, color = section_change)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, aes(group = section_change)) +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3, show.legend = F) + 
+  labs(x = "SDI", y = "Percent Difference", title = "Change in Infestation by Section by Density") +
+  theme_minimal()
+
+# ggplot(site_stats, aes(x = SDI, y = c(section_change_1_2, section_change_2_3, section_change_3_4, section_change_1_4))) +
+#   geom_point() +
+#   geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+#   labs(x = "SDI", y = "percent difference", title = "Change in Infestation by section by Density")
+# 
+# ggplot(site_stats, aes(x = SDI, y = (Percent_by_tree_2 - Percent_by_tree_1))) +
+#   geom_point() +
+#   geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+#   labs(x = "SDI", y = "percent difference", title = "Change in Infestation by total tree count by Density")
+```
+
+## Plot infestation (Time 1) vs density - not much
+
+```{r}
+ggplot(site_stats, aes(x = SDI, y = prop_infested_1_by_section)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "SDI", y = "percent difference", title = "Change in Infestation by section by Density(SDI)")
+
+ggplot(site_stats, aes(x = SDI, y = Percent_by_tree_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "SDI", y = "percent difference", title = "Change in Infestation (tree count) by Density(SDI)")
+```
+## Prevalence (Time 1) by TPHA - looks significant (negative) - R-squared = 0.88
+
+```{r}
+ggplot(site_stats, aes(x = TPHA, y = prop_infested_1_by_section)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "TPHA", y = "percent", title = "Infestation by section by Trees per Hectare")
+
+lm_prev_TPHA <- lm(TPHA ~ prop_infested_1_by_section, data = site_stats)
+summary(lm_prev_TPHA)
+
+ggplot(site_stats, aes(x = TPHA, y = Percent_by_tree_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "TPHA", y = "percent", title = "Infestation (tree count) by Trees per Hectare")
+
+lm_prev_TPHA_by_tree <- lm(TPHA ~ Percent_by_tree_1, data = site_stats)
+summary(lm_prev_TPHA)
+```
+
+### Change in Prevalence vs TPHA - also somewhat significant (negative) R-squared = 0.88ish
+
+```{r}
+ggplot(site_stats, aes(x = TPHA, y = (prop_infested_2_by_section - prop_infested_1_by_section))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "TPHA", y = "percent difference", title = "Change in Infestation by section by Trees per Hectare")
+
+lm_prev_TPHA_difference <- lm(TPHA ~ (prop_infested_2_by_section - prop_infested_1_by_section), data = site_stats)
+summary(lm_prev_TPHA_difference)
+
+ggplot(site_stats, aes(x = TPHA, y = (Percent_by_tree_2 - Percent_by_tree_1))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "TPHA", y = "percent difference", title = "Change in Infestation (tree count) by Trees per Hectare")
+
+lm_prev_TPHA_difference_by_tree <- lm(TPHA ~ (Percent_by_tree_2 - Percent_by_tree_1), data = site_stats)
+summary(lm_prev_TPHA_difference_by_tree)
+```
+
+## Prevalence (Time 1) by QMD - looks significant - Rsquared = 0.67 by section and 0.87 by tree count
+
+```{r}
+p1 <- ggplot(site_stats, aes(x = QMD, y = prop_infested_1_by_section)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "QMD", y = "Percent Infested", title = "Proportion sections infested by QMD")
+
+
+lm_prev_QMD <- lm(QMD ~ prop_infested_1_by_section, data = site_stats)
+summary(lm_prev_QMD)
+
+# Insert R-squared value into graph
+rsquared_p1 <- summary(lm_prev_QMD)$r.squared
+
+p1 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p1, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+##
+
+p2 <- ggplot(site_stats, aes(x = QMD, y = Percent_by_tree_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "QMD", y = "Percent infested", title = "Percent infested (tree count) by QMD")
+
+lm_prev_QMD_by_tree <- lm(TPHA ~ Percent_by_tree_1, data = site_stats)
+summary(lm_prev_QMD_by_tree)
+rsquared_p2 <- summary(lm_prev_QMD_by_tree)$r.squared
+
+p2 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p2, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+```
+
+### Difference in Prevalence by QMD
+
+```{r}
+p3 <- ggplot(site_stats, aes(x = QMD, y = (prop_infested_2_by_section - prop_infested_1_by_section))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "QMD", y = "percent difference", title = "Infestation difference of sections by QMD")
+
+lm_prev_QMD_difference <- lm(QMD ~ (prop_infested_2_by_section - prop_infested_1_by_section), data = site_stats)
+summary(lm_prev_QMD_difference)
+
+# Insert R-squared value into graph
+rsquared_p3 <- summary(lm_prev_QMD_difference)$r.squared
+
+p3 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p3, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+##
+
+ggplot(site_stats, aes(x = QMD, y = (Percent_by_tree_2 - Percent_by_tree_1))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "QMD", y = "percent difference", title = "Infestation difference (tree count) by QMD")
+```
+
+## Prevalence (Time 1) by Average Basal Area - Rsquared = 0.68 for section and 0.87 by tree count
+
+```{r}
+p4 <- ggplot(site_stats, aes(x = Average_Basal_Area_Per_Tree, y = prop_infested_1_by_section)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Avg. Basal area", y = "Precent sections infested", title = "Percent of sections infested at Time 1 vs Basal Area")
+
+lm_prev_ba <- lm(Average_Basal_Area_Per_Tree ~ prop_infested_1_by_section, data = site_stats)
+summary(lm_prev_ba)
+
+# Insert R-squared value into graph
+rsquared_p4 <- summary(lm_prev_ba)$r.squared
+
+p4 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p4, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+##
+
+p5 <- ggplot(site_stats, aes(x = Average_Basal_Area_Per_Tree, y = Percent_by_tree_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Avg. Basal Area", y = "Percent trees infested", title = "Percent of trees infested by Basal Area")
+
+lm_prev_ba_by_tree <- lm(Average_Basal_Area_Per_Tree ~ Percent_by_tree_1, data = site_stats)
+summary(lm_prev_ba_by_tree)
+
+rsquared_p5 <- summary(lm_prev_ba_by_tree)$r.squared
+
+p5 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p5, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+```
+
+### Change in Prevalence by Average Basal Area - R-squared = 0.63 for section and 0.80 by tree
+
+```{r}
+p6 <- ggplot(site_stats, aes(x = Average_Basal_Area_Per_Tree, y = (prop_infested_2_by_section - prop_infested_1_by_section))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Average_Basal_Area_Per_Tree", y = "percent difference", title = "Infestation by section by Average_Basal_Area_Per_Tree")
+
+lm_prev_ba_difference <- lm(Average_Basal_Area_Per_Tree ~ (prop_infested_2_by_section - prop_infested_1_by_section), data = site_stats)
+summary(lm_prev_ba_difference)
+
+# Insert R-squared value into graph
+rsquared_p6 <- summary(lm_prev_ba_difference)$r.squared
+
+p6 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p6, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+##
+
+p7 <- ggplot(site_stats, aes(x = Average_Basal_Area_Per_Tree, y = (Percent_by_tree_2 - Percent_by_tree_1))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Average_Basal_Area_Per_Tree", y = "percent difference", title = "Infestation (tree count) by Average_Basal_Area_Per_Tree")
+
+lm_prev_ba_difference_by_tree <- lm(Average_Basal_Area_Per_Tree ~ (Percent_by_tree_2 - Percent_by_tree_1), data = site_stats)
+summary(lm_prev_ba_difference_by_tree)
+
+rsquared_p7 <- summary(lm_prev_ba_difference_by_tree)$r.squared
+
+p7 + annotate(
+  "text",
+  x = Inf, y = Inf,                # Specify position outside the plot
+  label = paste("R-squared =", round(rsquared_p7, 4)),
+  hjust = 1, vjust = 1,            # Adjust justification
+  color = "black", size = 3        # Customize text appearance
+)
+```
+## Prevalence (Time 1) by Stand Basal Area -  very low R-squared values
+
+```{r}
+ggplot(site_stats, aes(x = `Stand BA`, y = prop_infested_1_by_section)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Stand BA", y = "Precent infested", title = "Change in Infestation by section by Stand Basal Area")
+
+lm_prev_stand_ba <- lm(`Stand BA` ~ prop_infested_1_by_section, data = site_stats)
+summary(lm_prev_stand_ba)
+
+ggplot(site_stats, aes(x = `Stand BA`, y = Percent_by_tree_1)) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Stand BA", y = "Precent infested", title = "Change in Infestation (tree count) by Stand Basal Area")
+
+lm_prev_stand_ba_by_tree <- lm(`Stand BA` ~ Percent_by_tree_1, data = site_stats)
+summary(lm_prev_stand_ba_by_tree)
+```
+
+### Change in Prevalence by Stand BA - not much
+
+```{r}
+ggplot(site_stats, aes(x = `Stand BA`, y = (prop_infested_2_by_section - prop_infested_1_by_section))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Stand BA", y = "percent difference", title = "Infestation by section by Stand BA")
+
+ggplot(site_stats, aes(x = Average_Basal_Area_Per_Tree, y = (Percent_by_tree_2 - Percent_by_tree_1))) +
+  geom_point() +
+  geom_label(aes(label = `Site ID`), vjust = 1.25, size = 3) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Stand BA", y = "percent difference", title = "Infestation (tree count) by Stand BA")
+```
+
+# Intensity of infestation over time against variables of interest
+
+```{r}
+combined <- combined %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) # Change all "1-" ratings to just a singular 1 value
+
+combined <- combined %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")), as.numeric)
+
+
+combined <- combined %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")),~coalesce(., 0)) # change all NA's to 0
+
+str(combined)
+
+combined$uniqueID <- paste(combined$`Site ID`, combined$`Tag #`, combined$Species, sep="")
+
+# Change Infestation to binary variable
+combined$`Inf Location`[ combined$`Inf Location`== "-"] <- 0
+unique(combined$`Inf Location`)
+combined$`Inf Location`[combined$`Inf Location` == "BO" | combined$`Inf Location` == "BR, BO" | combined$`Inf Location` == "BR"] <- 1
+combined <- combined[!is.na(combined$`Inf Location`),] # Drop NA's
+combined$`Inf Location` <- as.numeric(combined$`Inf Location`)
+str(combined)
+
+# First we'll subset by Visit
+visit1 <- combined %>% filter(Visit == 1)
+visit2 <- combined %>% filter(Visit == 2)
+visit3 <- combined %>% filter(Visit == 3)
+visit4 <- combined %>% filter(Visit == 4)
+
+# We'll merge the two by Tag #, we have a few more in the second visit due to adding trees
+
+visit3 <- visit3 %>%
+  rename_with(~ paste0(., "_v3"), -uniqueID) # add suffixes to visit 3 and 4
+visit4 <- visit4 %>%
+  rename_with(~ paste0(., "_v4"), -uniqueID) 
+
+merged <- visit1 %>%
+  left_join(visit2, by = "uniqueID", suffix = c("_v1", "_v2")) %>%
+  left_join(visit3, by = "uniqueID", suffix = c("", "_v3")) %>%
+  left_join(visit4, by = "uniqueID", suffix = c("", "_v4")) %>%
+  
+  mutate(
+    site = coalesce(`Site ID_v1`, `Site ID_v2`, `Site ID_v3`, `Site ID_v4`),
+    tag = coalesce(`Tag #_v1`, `Tag #_v2`, `Tag #_v3`, `Tag #_v4`),
+    species = coalesce(Species_v1, Species_v2, Species_v3, Species_v4),
+    dbh = coalesce(DBH_v1, DBH_v2, DBH_v3, DBH_v4),
+    height = coalesce(Height_v1, Height_v2, Height_v3, Height_v4),
+    canopy_ht = coalesce(`Canopy Height_v1`, `Canopy Height_v2`, `Canopy Height_v3`, `Canopy Height_v4`),
+    brooms = coalesce(`Broom (#)_v1`, `Broom (#)_v2`, `Broom (#)_v3`, `Broom (#)_v4`),
+    rot = coalesce(Rot_v1, Rot_v2, Rot_v3, Rot_v4),
+  ) %>%
+  
+  # Select combined columns and add suffixes to non-identical columns
+  select(
+    site, 
+    tag, 
+    species, 
+    dbh,
+    height,
+    canopy_ht,
+    brooms,
+    rot,
+    `Dead / Alive_v1`, `Dead / Alive_v2`, `Dead / Alive_v3`, `Dead / Alive_v4`,  # Example of different columns with suffixes
+    `Inf Location_v1`, `Inf Location_v2`, `Inf Location_v3`, `Inf Location_v4`,
+    Gouting_v1, Gouting_v2, Gouting_v3, Gouting_v4,
+    Beetle_v1, Beetle_v2, Beetle_v3, Beetle_v4,
+    NL_v1, NL_v2, NL_v3, NL_v4,
+    NLW_v1, NLW_v2, NLW_v3, NLW_v4,
+    NM_v1, NM_v2, NM_v3, NM_v4,
+    NMW_v1, NMW_v2, NMW_v3, NMW_v4,
+    NH_v1, NH_v2, NH_v3, NH_v4,
+    NHW_v1, NHW_v2, NHW_v3, NHW_v4,
+    SL_v1, SL_v2, SL_v3, SL_v4,
+    SLW_v1, SLW_v2, SLW_v3, SLW_v4,
+    SM_v1, SM_v2, SM_v3, SM_v4,
+    SMW_v1, SMW_v2, SMW_v3, SMW_v4,
+    SH_v1, SH_v2, SH_v3, SH_v4,
+    SHW_v1, SHW_v2, SHW_v3, SHW_v4,
+    Notes_v1, Notes_v2, Notes_v3, Notes_v4, 
+    Visit_v1, Visit_v2, Visit_v3, Visit_v4,
+    WSB_v1, WSB_v2, WSB_v3, WSB_v4 
+  )
+
+
+merged <- merged %>% distinct(site, tag, .keep_all = TRUE) # Get rid of duplicates
+
+# Now we'll look at the change from Visit 1 to Visit 2 - anything that's not zero should be newly infested
+# merged$SLchange <- merged$SL_Visit2 - merged$SL_Visit1
+# merged$SMchange <- merged$SM_Visit2 - merged$SM_Visit1
+# merged$SHchange <- merged$SH_Visit2 - merged$SH_Visit1
+# merged$NLchange <- merged$NL_Visit2 - merged$NL_Visit1
+# merged$NMchange <- merged$NM_Visit2 - merged$NM_Visit1
+# merged$NHchange <- merged$NH_Visit2 - merged$NH_Visit1
+# merged$totalchange <- merged$SLchange + merged$SMchange + merged$SHchange + merged$NLchange + merged$NMchange + merged$NHchange
+
+# Create a binary infestation variable just to make sure infestation location is accurate
+
+# replace na's in section ratings with zeros
+merged$NL_v1[is.na(merged$NL_v1)] <- 0
+merged$NM_v1[is.na(merged$NM_v1)] <- 0
+merged$NH_v1[is.na(merged$NH_v1)] <- 0
+merged$SL_v1[is.na(merged$SL_v1)] <- 0
+merged$SM_v1[is.na(merged$SM_v1)] <- 0
+merged$SH_v1[is.na(merged$SH_v1)] <- 0
+merged$NL_v2[is.na(merged$NL_v2)] <- 0
+merged$NM_v2[is.na(merged$NM_v2)] <- 0
+merged$NH_v2[is.na(merged$NH_v2)] <- 0
+merged$SL_v2[is.na(merged$SL_v2)] <- 0
+merged$SM_v2[is.na(merged$SM_v2)] <- 0
+merged$SH_v2[is.na(merged$SH_v2)] <- 0
+merged$NL_v3[is.na(merged$NL_v3)] <- 0
+merged$NM_v3[is.na(merged$NM_v3)] <- 0
+merged$NH_v3[is.na(merged$NH_v3)] <- 0
+merged$SL_v3[is.na(merged$SL_v3)] <- 0
+merged$SM_v3[is.na(merged$SM_v3)] <- 0
+merged$SH_v3[is.na(merged$SH_v3)] <- 0
+merged$NL_v4[is.na(merged$NL_v4)] <- 0
+merged$NM_v4[is.na(merged$NM_v4)] <- 0
+merged$NH_v4[is.na(merged$NH_v4)] <- 0
+merged$SL_v4[is.na(merged$SL_v4)] <- 0
+merged$SM_v4[is.na(merged$SM_v4)] <- 0
+merged$SH_v4[is.na(merged$SH_v4)] <- 0
+
+merged <- merged %>%
+  dplyr::mutate(
+    # Create binary infestation variable for visit_1
+     infestation_visit_1 = if_else(
+      rowSums(across(c("NL_v1", "NM_v1", "NH_v1", "SL_v1", "SM_v1", "SH_v1"))) > 0,
+      1, 0
+    ),
+    
+    # Repeat for other visits
+    infestation_visit_2 = if_else(
+      rowSums(across(c("NL_v2", "NM_v2", "NH_v2", "SL_v2", "SM_v2", "SH_v2"))) > 0,
+      1, 0
+    ),
+    
+    infestation_visit_3 = if_else(
+      rowSums(across(c("NL_v3", "NM_v3", "NH_v3", "SL_v3", "SM_v3", "SH_v3"))) > 0,
+      1, 0
+    ),
+    
+    infestation_visit_4 = if_else(
+      rowSums(across(c("NL_v4", "NM_v4", "NH_v4", "SL_v4", "SM_v4", "SH_v4"))) > 0,
+      1, 0
+    )
+  )
+
+# Make a new infestation variable to check whether a tree gained an infestation at any point during study
+
+merged <- merged %>%
+  dplyr::mutate(
+    new_infestation = if_else(infestation_visit_1 == 0 & (infestation_visit_2 == 1 | infestation_visit_3 == 1 | infestation_visit_4 == 1), 1, 0)
+  )
+
+
+```
+
+# Now we have change in infestation by section sums, which we can plot against tree attributes
+
+```{r}
+
+ggplot(merged, aes(x = DBH_Visit1, y = totalchange, group = `Site ID_Visit1`)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  xlim (0, 25) +
+  labs(x = "DBH", y = "change in infestation by section total", title = "Infestation change by section vs DBH") +
+  facet_wrap(~ `Site ID_Visit1`) 
+```
+
+# Lets plot out all of our sites and look at DBH vs newly infested
+
+```{r}
+host <- merged %>% filter(species == "ABLA" | species == "ABCO") # Filter out hosts
+live_host <- host %>% filter(`Dead / Alive_v1` == 1) # Filter out live hosts
+
+# Now we'll look at all newly infested trees over the course of the study
+
+ggplot(live_host, aes(x = new_infestation, y = dbh, color = factor(new_infestation))) +
+  geom_boxplot() +
+  facet_wrap(~ site, scales = "free_y") +
+  labs(
+    x = "Infestation Status",
+    y = "DBH",
+    title = "DBH by Infestation Status for Each Site"
+  ) +
+  scale_x_discrete(labels = c("Not Infested", "Infested")) +
+  theme_minimal()
+
+```
+
+# Gouting
+
+- Look at percentage of trees gouted for each level
+```{r}
+merged$Gouting_Visit1[is.na(merged$Gouting_Visit1)] <- 0 # change NA's to 0
+gouting_percentages <- with(merged, tapply(Gouting_Visit1, `Site ID_Visit1`, function(x) prop.table(table(x)) * 100))
+
+gouting_table <- merged %>%
+  group_by(`Site ID_Visit1`) %>%
+  reframe(percent_gout_1 = (nrow(Gouting_Visit1 == 1) / n()) * 100,
+            percent_gout_2 =  nrow(Gouting_Visit1 == 2 / n()) * 100)
+
+```

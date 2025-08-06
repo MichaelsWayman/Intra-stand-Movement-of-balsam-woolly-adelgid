@@ -1,0 +1,1320 @@
+---
+title: "Spatial_data"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Spatial Indices
+1/27/23 * approx date
+Michael Wayman
+
+The purpose of this script is to attempt to run through the glm workfloe with the intention of creating a glm model that addresses the probability of an individual tree getting infested based on individual attributes. Let's do it!
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+library(lme4) # to use glmer
+
+```
+
+## Clean out global environment
+
+```{r}
+rm(list = ls())
+```
+
+## Load Data
+
+```{r, echo = F, warning=FALSE}
+all_data <- read_xlsx("combined_cleaned2.xlsx")
+all_data <- all_data[!duplicated(all_data), ] # - there shouldn't be duplicates now
+site_stats <- read_xlsx("site_stats.xlsx")
+data_with_dis <- read_xlsx("data_with_nearest_info.xlsx")
+
+```
+
+# First, we'll plot histograms for all of our covariates and do any transformations that we may need to do (eg. Site as a factor)
+
+# Histograms
+## DBH
+
+```{r}
+
+hist(all_data$DBH)
+max(all_data$DBH, na.rm = TRUE)
+hist(log(all_data$DBH))
+all_data$logDBH <- log(all_data$DBH)
+
+```
+
+## Height
+
+```{r}
+
+hist(all_data$Height)
+max(all_data$Height, na.rm = TRUE)
+all_data[which.max(all_data$Height),] # Need to fix max height, incorrect
+hist(log(all_data$Height))
+all_data$logHeight <- log(all_data$Height)
+
+```
+
+## Canopy Height
+
+```{r}
+
+hist(all_data$`Canopy Height`)
+hist(log(all_data$`Canopy Height`))
+all_data$logCanopyHeight <- log(all_data$`Canopy Height`)
+
+```
+
+## Gouting
+
+```{r}
+
+hist(all_data$Gouting)
+# can be input as categorical
+
+```
+
+## Brooms
+
+```{r}
+
+hist(all_data$`Broom (#)`)
+hist(log(all_data$`Broom (#)`))
+# could look at binary (has some/don't) AND
+# another covariate with how many
+
+all_data$broom_binary <- ifelse(all_data$`Broom (#)` > 0, 1, 0)
+
+```
+
+
+## Sections and infestation is all ordinal
+
+# Pair-wise correlations
+
+```{r}
+
+pairs(all_data[, c("DBH", "Height", "Canopy Height", "Gouting", "Broom (#)")], pch = 16, col = "blue", main = "Pair-wise Correlations")
+
+cor(all_data[, c("DBH", "Height", "Canopy Height", "Gouting", "Broom (#)")], use = "complete.obs")
+
+cor(all_data[, c("logDBH", "logHeight", "Canopy Height", "Gouting", "Broom (#)")], use = "complete.obs")
+
+# add columns with log tranformed values
+
+```
+We see from this correlation matrix that we're not going to want to include both DBH and height in a model.
+
+# Create a summed infestation statistic for model
+
+```{R}
+str(all_data)
+# We need to change all of our 1-somethings into just 1
+working <- all_data
+
+working <- working %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) # Change all "1-" ratings to just a singular 1 value
+
+working <- working %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")), as.numeric)
+
+working <- working %>%
+  mutate_at(vars(c("NL", "NM", "NH", "SL", "SM", "SH")),~coalesce(., 0)) # change all NA's to 0
+
+str(working)
+head(working)
+
+
+working$infestation_sum <- working$NL + working$NM + working$NH + working$SL + working$SM + working$SH
+
+```
+
+## Plotting summed statistic
+
+```{r}
+
+hist(working$infestation_sum) # A lot of zeros
+hist(log(working$infestation_sum))
+
+```
+We have a lot of zeros, this may require ZIP (zero-inflated proabability model) later on
+
+# Response variable - infestation as a binary response
+
+```{r}
+
+# first we need to make a binary infested vs not variable
+working$infested <- ifelse(working$`Inf Location` == "-", 0, 1)
+
+# that worked but there are mistakes in the data, let's find them all
+# Create a vector indicating whether the conditions are met
+conditions_met <- with(working, (infestation_sum != 0 & infested == 1) | (infestation_sum == 0 & infested == 0))
+
+# Print rows where conditions are not met
+print(working[!conditions_met, ])
+
+```
+
+# First model
+
+Let's look at the probability of a tree getting infested for the first time based on a group of predictors. In order to do this setup, we'll need to get a response variable that is 1 if infested for the first time on visit 2. So we'll colapse our data into visits, code a new infestation variable and use this as our response. We'll then add in our predictors and work through our modelling process.
+
+
+## Re-coding
+```{r}
+# data_with_dis$site_tag <- paste(data_with_dis$site, data_with_dis$tag, sep = "")
+
+host <- data_with_dis %>% filter(species == "ABLA" | species == "ABCO") # Filter out hosts
+
+# live_host <- host %>% filter(`Dead / Alive_Visit1` == 1) # Filter out live hosts
+
+
+# new_infestation column will be our binary new infestation variable
+#host$new_infestation <- host$`Inf Location_Visit2` - host$`Inf Location_Visit1`
+#host$new_infestation[host$new_infestation == -1] <- 0
+
+# this change in infestation may be used later (-1 corresponds to trees that lost infestation, 1 gained it, 0 had no change)
+#host$changeininfestation <- host$`Inf Location_Visit2` - host$`Inf Location_Visit1`
+
+# tack on distances and bearings to nearest infested
+#data_with_dis$site_tag <- paste(data_with_dis$`Site ID_Visit1`, data_with_dis$`Tag #`, sep = "")
+#data_with_dis <- data_with_dis %>% distinct(`Site ID_Visit1`, `site_tag`, .keep_all = TRUE) # Get rid of duplicates
+
+```
+
+## Beetles
+
+I want to make one column that's just binary beetles or not and then code a variable that represents our groups
+
+```{r}
+unique(host$Beetle_v1)
+host$beetle.binary_v1 <- if_else(host$Beetle_v1 == "-" | is.na(host$Beetle_v1), 0, 1)
+host$beetle.binary_v2 <- if_else(host$Beetle_v2 == "-" | is.na(host$Beetle_v2), 0, 1)
+host$beetle.binary_v3 <- if_else(host$Beetle_v3 == "-" | is.na(host$Beetle_v3), 0, 1)
+host$beetle.binary_v4 <- if_else(host$Beetle_v4 == "-" | is.na(host$Beetle_v4), 0, 1)
+
+```
+
+## Model set-up
+
+```{r}
+# Think
+table(host$new_infestation)
+
+# Looking at bearings
+hist(host$bearings1)
+
+# convert to metric and then log variables
+host$dbh <- host$dbh * 2.54
+host$logDBH <- log(host$dbh)
+
+host$height <- host$height * 0.3048
+host$logHeight <- log(host$height)
+
+host$canopy_ht <- host$canopy_ht * 0.3048
+
+host$broom_binary <- ifelse(host$brooms > 0, 1, 0)
+
+host$logInfestsum <- log(host$inf_sum_Visit1_target)
+host$logInfestsum2 <- log(host$inf_sum_Visit2_target)
+host$logInfestsum3 <- log(host$inf_sum_Visit3_target)
+
+host$Gouting_v1 <- as.ordered(host$Gouting_v1)
+host$Gouting_v1 <- ifelse(is.na(host$Gouting_v1), 0, host$Gouting_v1)
+
+newinf <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings1 + inf_sum_Visit1_target,
+                    data = host,
+                    family = binomial(link = "logit"))
+library(DHARMa)
+library(lme4)
+
+newinfSims <- simulateResiduals(newinf)
+plot(newinfSims)
+
+summary(newinf)
+
+# model with logged covariates and Gouting as an ordered factor
+
+newinflog <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings1 + logInfestsum,
+                    data = host,
+                    family = binomial(link = "logit"))
+
+
+newinflogSims <- simulateResiduals(newinflog)
+plot(newinflogSims)
+
+summary(newinflog)
+
+# Base model with interaction
+
+newinf_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings1,
+                    data = host,
+                    family = binomial(link = "logit"))
+
+newinf_interactSims <- simulateResiduals(newinf_interact)
+plot(newinf_interactSims)
+
+summary(newinf_interact)
+
+# Logged model with distance and infestation level as an interaction
+
+newinflog_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE * logInfestsum + logDBH + Gouting_v1 + brooms + broom_binary + bearings1,
+                    data = host,
+                    family = binomial(link = "logit"))
+
+newinflog_interact_sims <- simulateResiduals(newinflog_interact)
+plot(newinflog_interact_sims)
+
+summary(newinflog_interact)
+
+anova(newinf, newinflog, newinf_interact, newinflog_interact)
+
+```
+
+# Add in Site as RE
+
+```{r}
+library(lme4)
+
+newinf_RE <- glmer(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings1 + inf_sum_Visit1_target + (1|site),
+                    data = host,
+                    family = binomial(link = "logit"))
+
+# Random effects with logged things
+
+newinf_RE <- glmer(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings1 + logInfestsum + (1|site),
+                    data = host,
+                    family = binomial(link = "logit"))
+#library(DHARMa)
+
+newinfSims <- simulateResiduals(newinf_RE)
+plot(newinfSims)
+
+summary(newinf_RE)
+
+anova(newinf, newinflog, newinf_interact, newinflog_interact, newinf_RE)
+```
+
+# Just infested GLM for all sites
+
+```{r}
+
+inf_RE <- glmer(cbind(infested_v1, 1 - infested_v1) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings1 + inf_sum_Visit1_target + (1|site),
+                    data = host,
+                    family = binomial(link = "logit"))
+
+infSims <- simulateResiduals(inf_RE)
+plot(infSims)
+
+summary(inf_RE)
+
+```
+
+# Models by site
+
+I'd like to run these models on each site themselves. Maybe by just looking at each site, we may be able to glean different effects of variables. 
+
+```{r}
+
+unique(host$site)
+names(host)[1] <- "site"
+host$Gouting_v1 <- as.numeric(host$Gouting_v1)
+host$dbh[is.na(host$dbh)] <- 1.27 # change clumps to 0.5 in or 1.27cm
+CXSP <- host %>% dplyr::filter(site == "CXSP")
+EMIG <- host %>% dplyr::filter(site == "EMIG")
+SMMH <- host %>% dplyr::filter(site == "SMMH")
+FRNK <- host %>% dplyr::filter(site == "FRNK")
+MOCR <- host %>% dplyr::filter(site == "MOCR")
+MTTP <- host %>% dplyr::filter(site == "MTTP")
+SOAP <- host %>% dplyr::filter(site == "SOAP")
+TMPF <- host %>% dplyr::filter(site == "TMPF")
+
+# Rescale bearings for each site to reflect general wind patterns taken from RAWS data
+
+# Emig - 127 degrees prevailing wind
+original_min <- -180
+original_max <- 180
+new_center <- 127
+
+# Rescale function
+rescale_value <- function(value, original_min, original_max, new_center) {
+  scaled_value <- (value - (original_max + original_min) / 2) + new_center
+  return(scaled_value)
+}
+
+EMIG$bearings_scaled1 <- rescale_value(EMIG$bearings1, original_min, original_max, new_center)
+
+# CXSP - 215 degrees
+new_center <- 215
+CXSP$bearings_scaled1 <- rescale_value(CXSP$bearings1, original_min, original_max, new_center)
+
+# FRNK - 274 degrees
+new_center <- 274
+FRNK$bearings_scaled1 <- rescale_value(FRNK$bearings1, original_min, original_max, new_center)
+
+# MOCR - 282 degrees
+new_center <- 282
+MOCR$bearings_scaled1 <- rescale_value(MOCR$bearings1, original_min, original_max, new_center)
+
+# MTTP - 129 degrees
+new_center <- 129
+MTTP$bearings_scaled1 <- rescale_value(MTTP$bearings1, original_min, original_max, new_center)
+
+# SMMH - 279 degrees
+new_center <- 279
+SMMH$bearings_scaled1 <- rescale_value(SMMH$bearings1, original_min, original_max, new_center)
+
+# SOAP - 282 degrees
+new_center <- 282
+SOAP$bearings_scaled1 <- rescale_value(SOAP$bearings1, original_min, original_max, new_center)
+
+# TMPF - 274 degrees
+new_center <- 274
+TMPF$bearings_scaled1 <- rescale_value(TMPF$bearings1, original_min, original_max, new_center)
+
+```
+
+## CXSP
+
+```{r}
+# base model - NOTHING
+
+newinf_cxsp <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target + beetle.binary_v1,
+                    data = CXSP,
+                    family = binomial(link = "logit"))
+
+newinf_cxspSims <- simulateResiduals(newinf_cxsp)
+plot(newinf_cxspSims)
+
+summary(newinf_cxsp)
+
+# logged variables and binary broom - NOTHING
+
+cxsp_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = CXSP,
+                    family = binomial(link = "logit"))
+
+cxsp_logSims <- simulateResiduals(cxsp_log)
+plot(cxsp_logSims)
+
+summary(cxsp_log)
+
+# distance and infest sum as interaction - distnace and interaction appear significant
+
+newinf_cxsp_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = CXSP,
+                    family = binomial(link = "logit"))
+
+newinf_cxsp_interactSims <- simulateResiduals(newinf_cxsp_interact)
+plot(newinf_cxsp_interactSims)
+
+summary(newinf_cxsp_interact)
+
+anova(newinf_cxsp, newinf_cxsp_interact, newinf_cxsp_interactSims, newinf_cxsp_interactSims)
+
+```
+
+## EMIG
+
+```{r}
+# base model - Not working for some reason?? coming out as "large glm" - it was gouting with NA's that was the problem!!
+
+#unique(EMIG$dbh) # NA's - how to deal with this??
+#unique(EMIG$Gouting_v1)
+
+# We want to treat NA's as a seperate category, but not disregard them. Here, we'll switch out NA's with 0.5 to give it a numerical value
+#EMIG$dbh <- ifelse(is.na(EMIG$dbh), 0.5, EMIG$dbh)
+
+# Deal with Gouting NA's
+EMIG$Gouting_v1 <- ifelse(is.na(EMIG$Gouting_v1), 0, EMIG$Gouting_v1)
+unique(EMIG$Gouting_v1)
+
+# Base model - infestation sum of nearest infested significant
+newinf_emig <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = EMIG,
+                    family = binomial(link = "logit"))
+
+newinf_emigSims <- simulateResiduals(newinf_emig)
+plot(newinf_emigSims)
+
+summary(newinf_emig)
+
+# logged variables and binary broom - same as base
+
+emig_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = EMIG,
+                    family = binomial(link = "logit"))
+
+emig_logSims <- simulateResiduals(emig_log)
+plot(emig_logSims)
+
+summary(emig_log)
+
+# distance and infest sum as interaction - distance appears significant as well as sum of nearest infested
+
+newinf_emig_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = EMIG,
+                    family = binomial(link = "logit"))
+
+newinf_emig_interactSims <- simulateResiduals(newinf_emig_interact)
+plot(newinf_emig_interactSims)
+
+summary(newinf_emig_interact)
+
+# Logged model with interaction - distance, interanction, and brooms come out
+
+emig_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * logInfestsum) + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1,
+                    data = EMIG,
+                    family = binomial(link = "logit"))
+
+emig_loginteractSims <- simulateResiduals(emig_log_interact)
+plot(emig_loginteractSims)
+
+summary(emig_log_interact)
+
+```
+
+## SMMH
+
+```{r}
+# base model - NOTHING
+
+newinf_smmh <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = SMMH,
+                    family = binomial(link = "logit"))
+
+newinf_smmhSims <- simulateResiduals(newinf_smmh)
+plot(newinf_smmhSims)
+
+summary(newinf_smmh)
+
+# logged variables and binary broom - NOTHING
+
+smmh_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = SMMH,
+                    family = binomial(link = "logit"))
+
+smmh_logSims <- simulateResiduals(smmh_log)
+plot(smmh_logSims)
+
+summary(smmh_log)
+
+# distance and infest sum as interaction - nothing
+
+newinf_smmh_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = SMMH,
+                    family = binomial(link = "logit"))
+
+newinf_smmh_interactSims <- simulateResiduals(newinf_smmh_interact)
+plot(newinf_smmh_interactSims)
+
+summary(newinf_smmh_interact)
+
+# logged variables, binary broom, and interaction - Nothing
+
+smmh_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * logInfestsum) + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1,
+                    data = SMMH,
+                    family = binomial(link = "logit"))
+
+smmh_loginteractSims <- simulateResiduals(smmh_log_interact)
+plot(smmh_loginteractSims)
+
+summary(smmh_log_interact)
+```
+
+## FRNK
+
+```{r}
+# base model - DBH coming out relatively strong
+
+unique(FRNK$Gouting_v1)
+FRNK$Gouting_v1 <- ifelse(is.na(FRNK$Gouting_v1), 0, FRNK$Gouting_v1)
+
+newinf_frnk <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = FRNK,
+                    family = binomial(link = "logit"))
+
+newinf_frnkSims <- simulateResiduals(newinf_frnk)
+plot(newinf_frnkSims)
+
+summary(newinf_frnk)
+
+# logged variables and binary broom - logDBH coming out strong
+
+frnk_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = FRNK,
+                    family = binomial(link = "logit"))
+
+frnk_logSims <- simulateResiduals(frnk_log)
+plot(frnk_logSims)
+
+summary(frnk_log)
+
+# distance and infest sum as interaction - just DBH still
+
+newinf_frnk_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = FRNK,
+                    family = binomial(link = "logit"))
+
+newinf_frnk_interactSims <- simulateResiduals(newinf_frnk_interact)
+plot(newinf_frnk_interactSims)
+
+summary(newinf_frnk_interact)
+
+# logged variables, binary broom, and interaction - logDBH again
+
+frnk_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * logInfestsum) + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1,
+                    data = FRNK,
+                    family = binomial(link = "logit"))
+
+frnk_loginteractSims <- simulateResiduals(frnk_log_interact)
+plot(frnk_loginteractSims)
+
+summary(frnk_log_interact)
+```
+
+## MOCR
+
+```{r}
+# base model - NOTHING
+
+newinf_mocr <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = MOCR,
+                    family = binomial(link = "logit"))
+
+newinf_mocrSims <- simulateResiduals(newinf_mocr)
+plot(newinf_mocrSims)
+
+summary(newinf_mocr)
+
+# logged variables and binary broom - NOTHING
+
+mocr_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = MOCR,
+                    family = binomial(link = "logit"))
+
+mocr_logSims <- simulateResiduals(mocr_log)
+plot(mocr_logSims)
+
+summary(mocr_log)
+
+# distance and infest sum as interaction
+
+newinf_mocr_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = MOCR,
+                    family = binomial(link = "logit"))
+
+newinf_mocr_interactSims <- simulateResiduals(newinf_mocr_interact)
+plot(newinf_mocr_interactSims)
+
+summary(newinf_mocr_interact)
+
+# logged variables, binary broom and interaction - NOTHING
+
+mocr_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * logInfestsum) + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1,
+                    data = MOCR,
+                    family = binomial(link = "logit"))
+
+mocr_loginteractSims <- simulateResiduals(mocr_log_interact)
+plot(mocr_loginteractSims)
+
+summary(mocr_log_interact)
+```
+
+## MTTP
+
+```{r}
+# base model - NOTHING
+
+newinf_mttp <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = MTTP,
+                    family = binomial(link = "logit"))
+
+newinf_mttpSims <- simulateResiduals(newinf_mttp)
+plot(newinf_mttpSims)
+
+summary(newinf_mttp)
+
+# logged variables and no binary broom (small n) - NOTHING
+
+mttp_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + bearings_scaled1 + logInfestsum,
+                    data = MTTP,
+                    family = binomial(link = "logit"))
+
+mttp_logSims <- simulateResiduals(mttp_log)
+plot(mttp_logSims)
+
+summary(mttp_log)
+
+# distance and infest sum as interaction
+
+newinf_mttp_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = MTTP,
+                    family = binomial(link = "logit"))
+
+newinf_mttp_interactSims <- simulateResiduals(newinf_mttp_interact)
+plot(newinf_mttp_interactSims)
+
+summary(newinf_mttp_interact)
+
+# logged variables, no binary broom (small sample size I think) and interaction - NOTHING
+
+mttp_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * logInfestsum) + logDBH + Gouting_v1 + brooms + bearings_scaled1,
+                    data = MTTP,
+                    family = binomial(link = "logit"))
+
+mttp_loginteractSims <- simulateResiduals(mttp_log_interact)
+plot(mttp_loginteractSims)
+
+summary(mttp_log_interact)
+```
+
+## SOAP
+
+```{r}
+# base model
+unique(SOAP$Gouting_v1)
+SOAP$Gouting_v1 <- ifelse(is.na(SOAP$Gouting_v1), 0, SOAP$Gouting_v1)
+
+# Gouting won't go into this site because there is no gouting observed atm
+
+newinf_soap <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = SOAP,
+                    family = binomial(link = "logit"))
+
+newinf_soapSims <- simulateResiduals(newinf_soap)
+plot(newinf_soapSims)
+
+summary(newinf_soap)
+
+# logged variables and binary broom
+
+soap_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = SOAP,
+                    family = binomial(link = "logit"))
+
+soap_logSims <- simulateResiduals(soap_log)
+plot(soap_logSims)
+
+summary(soap_log)
+
+# distance and infest sum as interaction
+
+newinf_soap_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + brooms + bearings_scaled1,
+                    data = SOAP,
+                    family = binomial(link = "logit"))
+
+newinf_soap_interactSims <- simulateResiduals(newinf_soap_interact)
+plot(newinf_soap_interactSims)
+
+summary(newinf_soap_interact)
+
+# logged variables, binary broom and interaction - logDBH again
+
+soap_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * logInfestsum) + logDBH + brooms + broom_binary + bearings_scaled1,
+                    data = SOAP,
+                    family = binomial(link = "logit"))
+
+soap_loginteractSims <- simulateResiduals(soap_log_interact)
+plot(soap_loginteractSims)
+
+summary(soap_log_interact)
+```
+LogDBH coming out slightly significant
+
+## TMPF
+
+```{r}
+# base model
+unique(TMPF$Gouting_v1)
+TMPF$Gouting_v1 <- ifelse(is.na(TMPF$Gouting_v1), 0, TMPF$Gouting_v1)
+
+newinf_tmpf <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + dbh + Gouting_v1 + brooms + bearings_scaled1 + inf_sum_Visit1_target,
+                    data = TMPF,
+                    family = binomial(link = "logit"))
+
+newinf_tmpfSims <- simulateResiduals(newinf_tmpf)
+plot(newinf_tmpfSims)
+
+summary(newinf_tmpf)
+
+# logged variables and binary broom
+
+tmpf_log <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    DISTANCE + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1 + logInfestsum,
+                    data = TMPF,
+                    family = binomial(link = "logit"))
+
+tmpf_logSims <- simulateResiduals(tmpf_log)
+plot(tmpf_logSims)
+
+summary(tmpf_log)
+
+# distance and infest sum as interaction
+
+newinf_tmpf_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE * inf_sum_Visit1_target) + dbh + Gouting_v1 + brooms + bearings_scaled1,
+                    data = TMPF,
+                    family = binomial(link = "logit"))
+
+newinf_tmpf_interactSims <- simulateResiduals(newinf_tmpf_interact)
+plot(newinf_tmpf_interactSims)
+
+summary(newinf_tmpf_interact)
+
+# logged variables, binary broom and interaction
+
+tmpf_log_interact <- glm(cbind(new_infestation, 1 - new_infestation) ~
+                    (DISTANCE *  logInfestsum) + logDBH + Gouting_v1 + brooms + broom_binary + bearings_scaled1,
+                    data = TMPF,
+                    family = binomial(link = "logit"))
+
+tmpf_loginteractSims <- simulateResiduals(tmpf_log_interact)
+plot(tmpf_loginteractSims)
+
+summary(tmpf_log_interact)
+
+```
+# Semivariograms for each site intercept only or naive models
+
+## CXSP
+
+```{r}
+names(CXSP)[8] <- "infested"
+
+coordinates.cxsp <- CXSP[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.cxsp <- CXSP$infested
+
+# Create a SpatialPointsDataFrame
+cxsp_sp <- SpatialPointsDataFrame(coords = coordinates.cxsp, data = data.frame(infestation.cxsp), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_cxsp <- variogram(infestation.cxsp ~ 1, data = cxsp_sp)
+class(variogram_cxsp)
+
+# Plot the variogram
+plot(variogram_cxsp, main = "cxsp_variogram")
+
+# refit with autocorrelation fxns
+# get rid of any duplicate locations for spatial autocorrelation
+CXSP_nodupe <- CXSP[!duplicated(CXSP[, c("Latitude.focal", "Longitude.focal")]), ]
+## spherical
+cxsp_sph <- gls(infested ~ 1, data = CXSP_nodupe, correlation = corSpher(value = c(0.02,
+                                                                            0.14),
+                                                                          nugget = T))
+
+## Linear
+cxsp_lin <- gls(infested ~ 1, data = CXSP_nodupe, correlation = corLin(value = c(0.02,
+                                                                          0.14),
+                                                          form = ~ Latitude.focal + Longitude.focal, nugget = T))
+
+## Gaussian
+cxsp_gaus <- gls(infested ~ 1, data = CXSP_nodupe, correlation = corGaus(value = c(0.02,
+                                                                          0.14),
+                                                          form = ~ Latitude.focal + Longitude.focal, nugget = T))
+
+## Exponential 
+cxsp_exp <- gls(infested ~ 1, data = CXSP_nodupe, correlation = corExp(value = c(0.02,
+                                                                          0.14),
+                                                          form = ~ Latitude.focal + Longitude.focal, nugget = T))
+
+## Ratio
+cxsp_ratio <- gls(infested ~ 1, data = CXSP_nodupe, correlation = corRatio(value = c(0.02,
+                                                                          0.14),
+                                                          form = ~ Latitude.focal + Longitude.focal, nugget = T))
+
+## Compare
+summary(cxsp_sph)
+anova(cxsp_lin, cxsp_gaus, cxsp_exp, cxsp_ratio)
+
+
+```
+## EMIG
+
+```{r}
+names(EMIG)[8] <- "infested"
+
+coordinates.emig <- EMIG[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.emig <- EMIG$infested
+
+# Create a SpatialPointsDataFrame
+emig_sp <- SpatialPointsDataFrame(coords = coordinates.emig, data = data.frame(infestation.emig), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_emig <- variogram(infestation.emig ~ 1, data = emig_sp)
+
+# Plot the variogram
+plot(variogram_emig)
+
+# refit with autocorrelation fxns
+
+
+```
+
+## FRNK
+
+```{r}
+names(FRNK)[8] <- "infested"
+
+coordinates.frnk <- FRNK[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.frnk <- FRNK$infested
+
+# Create a SpatialPointsDataFrame
+frnk_sp <- SpatialPointsDataFrame(coords = coordinates.frnk, data = data.frame(infestation.frnk), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_frnk <- variogram(infestation.frnk ~ 1, data = frnk_sp)
+
+# Plot the variogram
+plot(variogram_frnk)
+
+# refit with autocorrelation fxns
+
+
+```
+## MOCR
+
+```{r}
+names(MOCR)[8] <- "infested"
+
+coordinates.mocr <- MOCR[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.mocr <- MOCR$infested
+
+# Create a SpatialPointsDataFrame
+mocr_sp <- SpatialPointsDataFrame(coords = coordinates.mocr, data = data.frame(infestation.mocr), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_mocr <- variogram(infestation.mocr ~ 1, data = mocr_sp)
+
+# Plot the variogram
+plot(variogram_mocr)
+
+# refit with autocorrelation fxns
+
+
+```
+
+## MTTP
+
+```{r}
+names(MTTP)[8] <- "infested"
+
+coordinates.mttp <- MTTP[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.mttp <- MTTP$infested
+
+# Create a SpatialPointsDataFrame
+mttp_sp <- SpatialPointsDataFrame(coords = coordinates.mttp, data = data.frame(infestation.mttp), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_mttp <- variogram(infestation.mttp ~ 1, data = mttp_sp)
+
+# Plot the variogram
+plot(variogram_mttp)
+
+# refit with autocorrelation fxns
+
+
+```
+
+## SMMH
+
+```{r}
+names(SMMH)[8] <- "infested"
+
+coordinates.smmh <- SMMH[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.smmh <- SMMH$infested
+
+# Create a SpatialPointsDataFrame
+smmh_sp <- SpatialPointsDataFrame(coords = coordinates.smmh, data = data.frame(infestation.smmh), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_smmh <- variogram(infestation.smmh ~ 1, data = smmh_sp)
+
+# Plot the variogram
+plot(variogram_smmh)
+
+# refit with autocorrelation fxns
+
+
+```
+
+## SOAP
+
+```{r}
+names(SOAP)[8] <- "infested"
+
+coordinates.soap <- SOAP[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.soap <- SOAP$infested
+
+# Create a SpatialPointsDataFrame
+soap_sp <- SpatialPointsDataFrame(coords = coordinates.soap, data = data.frame(infestation.soap), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_soap <- variogram(infestation.soap ~ 1, data = soap_sp)
+
+# Plot the variogram
+plot(variogram_soap)
+
+# refit with autocorrelation fxns
+
+
+```
+## TMPF
+
+```{r}
+names(TMPF)[8] <- "infested"
+
+coordinates.tmpf <- TMPF[, c("Latitude.focal", "Longitude.focal")] # create coordinate dataframe
+infestation.tmpf <- TMPF$infested
+
+# Create a SpatialPointsDataFrame
+tmpf_sp <- SpatialPointsDataFrame(coords = coordinates.tmpf, data = data.frame(infestation.tmpf), proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+# Calculate the variogram
+variogram_tmpf <- variogram(infestation.tmpf ~ 1, data = tmpf_sp)
+
+# Plot the variogram
+plot(variogram_tmpf)
+
+# refit with autocorrelation fxns
+
+
+```
+
+# Spatial set-up
+
+In this section we'll attempt to analyze the plots spatially in different ways. First, we'll try a good ol' Poisson point pattern. This involves laying a grid over the plot every 5 to ten meters, which creates a point pattern and then we can look at means across a site for each "section" and look at trends. I want to look at infestation sum vs prevalence FIRST, because that seems the most interesting and obvious thread to pull. We can then look at other variables that we've brought up before.
+
+** I ended up doing this in the grid data markdown sheet, head over there to see results!!
+
+# Intensity models
+
+What I want to do now is look at intensity as a response variable. I think I want to try Justin's method of slowly adding in variables to see how our variance changes with the addition of variables. Basically: we start simple and get more complex. We'll start by looking at intensity as a funciton of DBH, then add in other tree characteristics like brooms, gouting, then add in other tree characteristics such as nearest neighbor variables.
+
+This is on Posit browser since this version of R can't support the packages needed to run mixed models
+
+## All sites
+
+```{r}
+library(glmmTMB)
+
+hist(host$DISTANCE)
+host$logDISTANCE <- log(host$DISTANCE)
+host$absvalbearings <- abs(host$bearings1)
+
+intensity.glm <- glmmTMB(infestation_sum_Visit1_focal ~ 
+                      logDISTANCE + dbh + Gouting_v1 + brooms + absvalbearings + (1|site),
+                      family = nbinom1,
+                      data = host)
+
+# simulate residuals and not plot
+intensitySims <- simulateResiduals(intensity.glm)
+plot(intensitySims)
+
+testZeroInflation(intensitySims)
+
+summary(intensity.glm)
+
+# Let's use continuation ratio with logit link function and see how that fits 
+
+library(VGAM) # let's us use continuation ratio function
+
+
+
+```
+
+# Intensity in a Bayesian Framework
+
+```{r}
+library(glmmTMB)
+
+intensity.glm <- glmmTMB(infestation_sum_Visit1_focal ~ 
+                      log(DISTANCE) + dbh + Gouting_v1 + brooms + abs(bearings1) + (1|site),
+                      family = nbinom1,
+                      data = host)
+
+# Get rid of NA's for model
+host_no_na <- host %>% dplyr::filter(!is.na(dbh))
+
+intensity_jags_data <- list(infest_sum = host_no_na$infestation_sum_Visit1_focal, 
+                            logDISTANCE = host_no_na$logDISTANCE,
+                            # note that we have to convert the FoodTreatment factor to
+                            # a number to work appropriately in JAGS. Also, numeric coding needs to start at 0, not 1
+                            DBH_focal = host_no_na$dbh, 
+                            Gouting_focal = host_no_na$Gouting_v1,
+                            Brooms_focal = host_no_na$brooms,
+                            # same with SexParent. Also, numeric coding needs to start at 0
+                            N = nrow(host_no_na))
+
+intensity_jags_naive <- function(){
+  # Priors:
+  beta_0 ~ dnorm(0, 0.01) # intercept (use diffuse normal just as we would for standard regression)
+  beta_distance ~ dnorm(0, 0.01) # slope (use diffuse normal just as we would for standard regression)
+  beta_dbh ~ dnorm(0, 0.01)
+  beta_gouting ~ dnorm(0, 0.01)
+  beta_brooms ~ dnorm(0, 0.01)
+  # Note that we don't have any "tau" or "sigma" here, since we're taking the data to be Poisson, so
+  # if we know lambda, we know both the mean and the variance. 
+  
+  # Likelihood:
+  for (i in 1:N){
+    lin_comb[i] <- beta_0 + beta_distance * logDISTANCE[i] + beta_dbh * DBH_focal[i] +
+      beta_gouting * Gouting_focal[i] + beta_brooms * Brooms_focal[i]
+    # here's our linear combination of predictors, just like in a standard regression
+    lambda[i] <- exp(lin_comb[i]) # here we apply the link function to that 
+    # linear combination to get us back to the scale of lambda.
+    infest_sum[i] ~ dpois(lambda[i]) # Here's the Poisson likelihood,
+    # with a sampling-unit-specific value of the rate parameter, lambda[i].
+  }
+}
+
+intensity_inits <- function(){
+  list(beta_0 = rnorm(1, 0, 1), 
+       beta_distance = rnorm(1, 0, 1),
+       beta_dbh = rnorm(1, 0, 1),
+       beta_gouting = rnorm(1, 0, 1),
+       beta_brooms = rnorm(1, 0, 1))
+}
+
+intensity_params <- c("beta_0", "beta_distance", "beta_dbh", "beta_gouting", "beta_brooms")
+
+library(R2jags)
+
+intensity_fit_naive <- jags(data = intensity_jags_data, 
+                            inits = intensity_inits, 
+                            parameters.to.save = intensity_params, 
+                            model.file = intensity_jags_naive,
+                            n.chains = 3,
+                            n.iter = 12000, 
+                            n.burnin = 2000, 
+                            n.thin = 10, 
+                            DIC = F)
+intensity_fit_naive
+
+intensity.glm <- glm(infestation_sum_Visit1_focal ~ 
+                      logDISTANCE + dbh + Gouting_v1 + brooms,
+                      family = poisson,
+                      data = host_no_na)
+
+confint(intensity.glm) 
+# These intervals are pretty close to the 2.5th and 97.5th quantiles of beta_food 
+# and beta_parent in our Bayesian model. 
+
+# check for convergence
+traceplot(intensity_fit_naive, mfrow = c(2, 2), ask = F)
+
+intensity_mcmc <- as.mcmc(intensity_fit_naive)
+plot(intensity_mcmc)
+
+# Add in Random Effect
+
+intensity.glm <- glmmTMB(infestation_sum_Visit1_focal ~ 
+                      logDISTANCE + dbh + Gouting_v1 + brooms + (1|site),
+                      family = nbinom1,
+                      data = host)
+
+# Get rid of NA's for model
+
+pow <- function(base, exponent) {
+  return(base^exponent)
+}
+
+intensity_jags_data_re <- list(infest_sum = host_no_na$infestation_sum_Visit1_focal, 
+                            logDISTANCE = host_no_na$logDISTANCE,
+                            # note that we have to convert the FoodTreatment factor to
+                            # a number to work appropriately in JAGS. Also, numeric coding needs to start at 0, not 1
+                            DBH_focal = host_no_na$dbh, 
+                            Gouting_focal = host_no_na$Gouting_v1,
+                            Brooms_focal = host_no_na$brooms,
+                            site = as.numeric(as.factor(host_no_na$site)),
+                            # same with SexParent. Also, numeric coding needs to start at 0
+                            N = nrow(host_no_na),
+                            N_site = length(levels(factor(host_no_na$site))))
+
+intensity_jags_naive_re <- function(){
+  # Priors:
+  beta_0 ~ dnorm(0, 0.01) # intercept (use diffuse normal just as we would for standard regression)
+  beta_distance ~ dnorm(0, 0.01) # slope (use diffuse normal just as we would for standard regression)
+  beta_dbh ~ dnorm(0, 0.01)
+  beta_gouting ~ dnorm(0, 0.01)
+  beta_brooms ~ dnorm(0, 0.01)
+  # Note that we don't have any "tau" or "sigma" here, since we're taking the data to be Poisson, so
+  # if we know lambda, we know both the mean and the variance. 
+  
+  for(i in 1:N_site){
+    beta_site[i] ~ dnorm(0, tau_site)
+  }
+  
+  sigma_sq_site ~ dunif(0, 100) # here's my prior to nest variance
+  tau_site <- pow(sigma_sq_site,-2) # here, I'm converting from that variance to the precision (tau = 1/sqrt(var))
+  
+  # prior for dispersion parameter
+  r ~ dunif(0, 50) # r is the dispersion parameter. As r -> infinity, 
+  # the negative binomial goes to a Poisson, so this prior is not particularly
+  # restrictive (once r is 50, we're essentially working with something very like a Poisson)
+  
+  # Likelihood:
+  for (i in 1:N){
+    lin_comb[i] <- beta_0 + beta_site[site[i]] + beta_distance * logDISTANCE[i] + beta_dbh * DBH_focal[i] +
+      beta_gouting * Gouting_focal[i] + beta_brooms * Brooms_focal[i]
+    # here's our linear combination of predictors, just like in a standard regression
+    lambda[i] <- exp(lin_comb[i]) # here we apply the link function to that 
+    # linear combination to get us back to the scale of lambda.
+     p[i] <- r / (r + lambda[i]) # here's where we incorporate the dispersion parameter.
+    infest_sum[i] ~ dnegbin(p[i], r) # Here's the Neg Bin likelihood,
+    # with a sampling-unit-specific value of the rate parameter, lambda[i].
+  }
+}
+
+intensity_inits_re <- function(){
+  list(beta_0 = rnorm(1, 0, 1), 
+       beta_distance = rnorm(1, 0, 1),
+       beta_dbh = rnorm(1, 0, 1),
+       beta_gouting = rnorm(1, 0, 1),
+       beta_brooms = rnorm(1, 0, 1),
+       beta_site = rep(0, length(levels(factor(host_no_na$site)))),
+       r = runif(1, 0, 50))
+}
+
+intensity_params_re <- c("beta_0", "beta_distance", "beta_dbh", "beta_gouting", "beta_brooms", "beta_site", "sigma_sq_site", "r")
+
+intensity_fit_naive_re <- jags(data = intensity_jags_data_re, 
+                            inits = intensity_inits_re, 
+                            parameters.to.save = intensity_params_re, 
+                            model.file = intensity_jags_naive_re,
+                            n.chains = 3,
+                            n.iter = 12000, 
+                            n.burnin = 2000, 
+                            n.thin = 10, 
+                            DIC = F)
+intensity_fit_naive_re
+
+intensity.glm <- glmmTMB(infestation_sum_Visit1_focal ~ 
+                      logDISTANCE + dbh + Gouting_v1 + brooms + (1|site),
+                      family = nbinom1,
+                      data = host)
+
+confint(intensity.glm) 
+# These intervals are pretty close to the 2.5th and 97.5th quantiles of beta_food 
+# and beta_parent in our Bayesian model. 
+
+# check for convergence
+traceplot(intensity_fit_naive_re, mfrow = c(2, 2), ask = F)
+
+dev.off()
+
+intensity_mcmc_re <- as.mcmc(intensity_fit_naive_re)
+plot(intensity_mcmc_re)
+```
+
+## CXSP
+
+```{r}
+
+intensity.cxsp <- glm(infestation_sum_Visit1_focal ~ 
+                      DISTANCE + dbh + Gouting_v1 + brooms + bearings1 + beetle.bianry_v1,
+                      family = poisson,
+                      data = CXSP)
+plot(intensity.cxsp)
+summary(intensity.cxsp)
+
+```
+
+## EMIG
+
+NO beetle included because there were no beetle presence in live trees at this site
+
+```{r}
+
+intensity.emig <- glm(infestation_sum_Visit1_focal ~ 
+                      DISTANCE + dbh + Gouting_v1 + brooms + bearings1,
+                      family = poisson,
+                      data = EMIG)
+plot(intensity.emig)
+summary(intensity.emig)
+
+```
+
+

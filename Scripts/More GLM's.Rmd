@@ -1,0 +1,563 @@
+---
+title: "More GLMs"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Full Site Model
+4/11/24
+Michael Wayman
+
+This script is going to be an attempt to coalesce all the sites into GLM's that incorporate local stats. This will be a reflection of the Bayesian implementation, but for all sites and each individual site. I'm doing a new markdown so that I can get all the distances and local things calculated in one script, which will hopefully make things easier down the line.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# Clean out environment
+
+```{r}
+rm(list = ls())
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(lme4) # to use glmer
+library(data.table)
+library(R2jags)
+library(data.table)
+library(rfishnet2)
+library(glmmTMB)
+library(DHARMa)
+```
+
+# Load data
+
+```{r}
+
+combined <- read_xlsx("combined_cleaned.xlsx")
+points <- read.csv("all_points.csv", header = T)
+rest_of_points <- read.csv("rest_of_points.csv", header = T)
+
+points <- points %>% bind_rows(rest_of_points)
+
+```
+
+# Collapse visits and combine points
+
+```{r}
+names(combined)[1] <- "site"
+
+# Change Infestation to binary variable
+combined$`Inf Location`[combined$`Inf Location`== "-"] <- 0
+combined$`Inf Location`[combined$`Inf Location` == "BO" | combined$`Inf Location` == "BR, BO" | combined$`Inf Location` == "BR"] <- 1
+unique(combined$`Inf Location`)
+combined$`Inf Location` <-  if_else(combined$`Inf Location` == 1, 1, 0)
+combined$`Inf Location`[is.na(combined$`Inf Location`)] <- 0
+
+# First we'll subset by Visit
+visit1 <- combined %>% filter(Visit == 1)
+
+visit1$unique_ID <- paste(visit1$site, visit1$Species, visit1$`Tag #`, sep = "")
+
+visit2 <- combined %>% filter(Visit == 2)
+
+visit2$unique_ID <- paste(visit2$site, visit2$Species, visit2$`Tag #`, sep = "")
+
+# We'll merge the two by Tag #, we have a few more in the second visit due to adding trees
+combined_merged <- inner_join(visit1, visit2, by = "unique_ID", suffix = c("_Visit1", "_Visit2")) # we have duplicates
+combined_merged <- combined_merged %>% distinct(unique_ID, .keep_all = TRUE) # Get rid of duplicates
+
+# Make a host/non-host variable
+combined_merged$host <- if_else(combined_merged$Species_Visit1 == "ABLA", 1, 0)
+
+# Merge with points
+points$Name <- sub("^(\\d+)$", "abla\\1", points$Name)
+points$Name <- toupper(points$Name)
+
+fishnet_points <- points[, c("Name", "Latitude", "Longitude", "Elevation")]
+
+# To make sure we're combining the right points, we need to filter by site, add site name to Name and then combine back into our data
+
+cxsp_points <- spatial_search(fishnet_points, 41.641310, -111.491606, 1) # search 1km around point found
+ggplot(cxsp_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point() # check that it worked - hell yes spatial search
+
+cxsp_points$Site <- "CXSP"
+cxsp_points$unique_ID <- paste(cxsp_points$Site, cxsp_points$Name, sep = "")
+
+
+emig_points <- spatial_search(fishnet_points, 42.375017, -111.555346, 1)
+ggplot(emig_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+emig_points$Site <- "EMIG"
+emig_points$unique_ID <- paste(emig_points$Site, emig_points$Name, sep = "")
+
+
+smmh_points <- spatial_search(fishnet_points, 40.769878, -111.107718, 1)
+ggplot(smmh_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+smmh_points$Site <- "SMMH"
+smmh_points$unique_ID <- paste(smmh_points$Site, smmh_points$Name, sep = "")
+
+
+frnk_points <- spatial_search(fishnet_points, 41.933229, -111.570967, 1) # search 1km around point found
+ggplot(frnk_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+frnk_points$Site <- "FRNK"
+frnk_points$unique_ID <- paste(frnk_points$Site, frnk_points$Name, sep = "")
+
+
+mocr_points <- spatial_search(fishnet_points, 41.409149, -111.532901, 1) # search 1km around point found
+ggplot(mocr_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+mocr_points$Site <- "MOCR"
+mocr_points$unique_ID <- paste(mocr_points$Site, mocr_points$Name, sep = "")
+
+
+mttp_points <- spatial_search(fishnet_points, 40.435067, -111.638473, 1) # search 1km around point found
+ggplot(mttp_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+mttp_points$Site <- "MTTP"
+mttp_points$unique_ID <- paste(mttp_points$Site, mttp_points$Name, sep = "")
+
+#write_xlsx(mttp_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/mttp_points.xlsx")
+
+soap_points <- spatial_search(fishnet_points, 40.546185, -111.029622, 1) # search 1km around point found
+ggplot(soap_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+soap_points$Site <- "SOAP"
+soap_points$unique_ID <- paste(soap_points$Site, soap_points$Name, sep = "")
+
+#write_xlsx(soap_points,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/soap_points.xlsx")
+
+tmpf_points <- spatial_search(fishnet_points, 41.798592, -111.518826, 1) # search 1km around point found
+ggplot(tmpf_points, aes(x = Latitude, y = Longitude)) + 
+  geom_point()
+
+tmpf_points$Site <- "TMPF"
+tmpf_points$unique_ID <- paste(tmpf_points$Site, tmpf_points$Name, sep = "")
+
+all_points <- rbind(cxsp_points, emig_points, frnk_points, mocr_points, mttp_points, smmh_points, soap_points, tmpf_points)
+
+combined_merged$Name <- paste(combined_merged$Species_Visit1, combined_merged$`Tag #_Visit1`, sep = "")
+
+
+all_merged <- full_join(all_points, combined_merged, by = "unique_ID")
+
+# Omit points with no data associated or no point associated
+all_merged <- all_merged %>% filter(!is.na(site_Visit1))
+all_merged <- all_merged %>% filter(!is.na(Latitude))
+
+# writexl::write_xlsx(all_merged, "all_data_with_points.xlsx")
+```
+
+# Distances to all trees
+
+```{r}
+
+# Convert to sf
+all_merged_sf <- st_as_sf(all_merged, coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Define the target UTM zone
+target_crs <- 32612  # EPSG code for UTM zone 12
+
+# Transform the coordinates
+all_merged_utm <- st_transform(all_merged_sf, crs = target_crs)
+all_coords <- st_coordinates(all_merged_utm)
+all_coords <- as.data.frame(all_coords)
+
+# Put back into original datframe
+
+all_merged_utm$Longitude <- as.numeric(all_coords$X)
+all_merged_utm$Latitude <- as.numeric(all_coords$Y)
+
+all_infested <- all_merged_utm[all_merged_utm$`Inf Location_Visit1` == 1, ] # Infested trees with UTM coordinates
+
+
+# write_clip(all_merged_utm) # copy dataframe without making file
+all_merged_utm <- all_merged_utm[!duplicated(all_merged_utm$unique_ID), ] #- there shouldn't be duplicates now
+rownames(all_merged_utm) <- all_merged_utm$unique_ID
+
+
+euclidean_distance <- function(x1, y1, x2, y2) {
+    distance <- sqrt((x2 - x1)^2 + (y2 - y1)^2)
+    return(distance)
+}
+
+
+rm(Holder)
+Holder = as.data.frame(matrix(nrow=0,ncol=4)) 
+colnames(Holder) =c("PLOT", "FROM", "TARGET", "DISTANCE")
+
+# New loop 
+
+for (i in levels(as.factor(all_merged_utm$site_Visit1))) {
+  # Subset by plot
+  subset_frame <- subset(all_merged_utm, site_Visit1 == i)
+  
+  # Create matrix to store distances
+  n <- nrow(subset_frame)
+  distance_matrix <- matrix(0, nrow = n, ncol = n)
+  rownames(distance_matrix) <- subset_frame$unique_ID
+  colnames(distance_matrix) <- subset_frame$unique_ID
+  
+  # Populate distance matrix
+  for (row in 1:n) {
+    for (col in 1:n) {
+      distance_matrix[row, col] <- euclidean_distance(subset_frame$Longitude[row], subset_frame$Latitude[row],
+                                                      subset_frame$Longitude[col], subset_frame$Latitude[col])
+    }
+  }
+  
+  # Convert matrix to data frame
+  TEMP_DIST.df <- as.data.frame(distance_matrix)
+  
+  # Add tag_ID column
+  TEMP_DIST.df$tag_ID <- rownames(TEMP_DIST.df)
+  
+  # Reshape data
+  TEMP_DIST_MELT <- reshape2::melt(TEMP_DIST.df, id.vars = "tag_ID")
+  colnames(TEMP_DIST_MELT) <- c("FROM", "TARGET", "DISTANCE")
+  
+  # Add plot ID column
+  TEMP_DIST_MELT$PLOT <- i
+  
+  # Append to Holder
+  Holder <- rbind(Holder, TEMP_DIST_MELT)
+}
+
+
+#Merge with infestation data
+names(Holder)[1] <- "unique_ID"
+
+Holder_new <- merge(Holder, all_merged_utm, by.x = "TARGET", by.y = "unique_ID")
+holder_new.dt <- as.data.table(Holder_new)
+length(unique(holder_new.dt$unique_ID))
+nrow(holder_new.dt)
+names(holder_new.dt)[16] <- "infested_1"
+names(holder_new.dt)[42] <- "infested_2"
+#min_dist_holder <- holder_new.dt[`infested` == 1 & (DISTANCE == min(DISTANCE[(DISTANCE != 0)])) ,.(DISTANCE, TARGET),by=.("unique_ID")]
+
+# distance to nearest infested at time 1
+min_dist_holder <- holder_new.dt[infested_1 == 1 ,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+
+# distance to nearest infested at time 2
+min_dist_holder2 <- holder_new.dt[infested_2 == 1 ,.(TARGET, DISTANCE),by=.(unique_ID)][, .SD[which(DISTANCE == min(DISTANCE[which(DISTANCE!=0)]))],by=.(unique_ID)]
+
+names(min_dist_holder2)[2] <- "TARGET2"
+names(min_dist_holder2)[3] <- "DISTANCE2"
+
+# add distances to data
+# visit 1 distances
+data_with_nearest_infested_dis <- all_merged_utm %>% inner_join(min_dist_holder, by = "unique_ID")
+
+# visit 2 distances
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>% inner_join(min_dist_holder2, by = "unique_ID")
+
+data_with_nearest_infested_dis <- as.data.frame(data_with_nearest_infested_dis)
+
+
+#write_xlsx(data_with_nearest_infested_dis,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/data_with_nearest_infested.xlsx")
+
+```
+
+# Infestation Sum
+
+```{r}
+
+# Visit 1
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+  mutate_at(vars(c("NL_Visit1", "NM_Visit1", "NH_Visit1", "SL_Visit1", "SM_Visit1", "SH_Visit1")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) %>%
+  mutate_at(vars(c("NL_Visit1", "NM_Visit1", "NH_Visit1", "SL_Visit1", "SM_Visit1", "SH_Visit1")), as.numeric)
+# Change all "1-" ratings to just a singular 1 value and make numeric
+
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+  mutate_at(vars(c("NL_Visit1", "NM_Visit1", "NH_Visit1", "SL_Visit1", "SM_Visit1", "SH_Visit1")),~coalesce(., 0)) # change all NA's to 0
+
+data_with_nearest_infested_dis$infestation_sum_Visit1_focal <- data_with_nearest_infested_dis$NL_Visit1 + data_with_nearest_infested_dis$NM_Visit1 + data_with_nearest_infested_dis$NH_Visit1 + data_with_nearest_infested_dis$SL_Visit1 + data_with_nearest_infested_dis$SM_Visit1 + data_with_nearest_infested_dis$SH_Visit1
+
+# Visit 2
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+  mutate_at(vars(c("NL_Visit2", "NM_Visit2", "NH_Visit2", "SL_Visit2", "SM_Visit2", "SH_Visit2")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) %>%
+  mutate_at(vars(c("NL_Visit2", "NM_Visit2", "NH_Visit2", "SL_Visit2", "SM_Visit2", "SH_Visit2")), as.numeric)
+# Change all "1-" ratings to just a singular 1 valueand make numeric
+
+data_with_nearest_infested_dis <- data_with_nearest_infested_dis %>%
+  mutate_at(vars(c("NL_Visit2", "NM_Visit2", "NH_Visit2", "SL_Visit2", "SM_Visit2", "SH_Visit2")),~coalesce(., 0)) # change all NA's to 0
+
+data_with_nearest_infested_dis$infestation_sum_Visit2_focal <- data_with_nearest_infested_dis$NL_Visit2 + data_with_nearest_infested_dis$NM_Visit2 + data_with_nearest_infested_dis$NH_Visit2 + data_with_nearest_infested_dis$SL_Visit2 + data_with_nearest_infested_dis$SM_Visit2 + data_with_nearest_infested_dis$SH_Visit2
+
+# Subset target trees to get infesation sums
+targets <- as.character(data_with_nearest_infested_dis$TARGET)
+infested_subset_inf_sum <- data_with_nearest_infested_dis %>% filter(unique_ID %in% targets) %>% dplyr::select(c("unique_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal"))
+names(infested_subset_inf_sum)[1] <- "TARGET"
+names(infested_subset_inf_sum)[2] <- "inf_sum_Visit1_target"
+names(infested_subset_inf_sum)[3] <- "inf_sum_Visit2_target"
+
+
+
+# append sums to our main dataframe
+# Append target coordinates to data frame
+data_with_nearest_infested_dis <- inner_join(data_with_nearest_infested_dis, infested_subset_inf_sum, by = "TARGET")
+str(data_with_nearest_infested_dis)
+
+
+
+# Again for all data so we can extract values for full model
+
+# Visit 1
+all_merged_utm <- all_merged_utm %>%
+  mutate_at(vars(c("NL_Visit1", "NM_Visit1", "NH_Visit1", "SL_Visit1", "SM_Visit1", "SH_Visit1")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) %>%
+  mutate_at(vars(c("NL_Visit1", "NM_Visit1", "NH_Visit1", "SL_Visit1", "SM_Visit1", "SH_Visit1")), as.numeric)
+# Change all "1-" ratings to just a singular 1 value and make numeric
+
+all_merged_utm <- all_merged_utm %>%
+  mutate_at(vars(c("NL_Visit1", "NM_Visit1", "NH_Visit1", "SL_Visit1", "SM_Visit1", "SH_Visit1")),~coalesce(., 0)) # change all NA's to 0
+
+all_merged_utm$infestation_sum_Visit1_focal <- all_merged_utm$NL_Visit1 + all_merged_utm$NM_Visit1 + all_merged_utm$NH_Visit1 + all_merged_utm$SL_Visit1 + all_merged_utm$SM_Visit1 + all_merged_utm$SH_Visit1
+
+# Visit 2
+all_merged_utm <- all_merged_utm %>%
+  mutate_at(vars(c("NL_Visit2", "NM_Visit2", "NH_Visit2", "SL_Visit2", "SM_Visit2", "SH_Visit2")), 
+            funs(if_else(startsWith(., "1-"), "1", .))) %>%
+  mutate_at(vars(c("NL_Visit2", "NM_Visit2", "NH_Visit2", "SL_Visit2", "SM_Visit2", "SH_Visit2")), as.numeric)
+# Change all "1-" ratings to just a singular 1 valueand make numeric
+
+all_merged_utm <- all_merged_utm %>%
+  mutate_at(vars(c("NL_Visit2", "NM_Visit2", "NH_Visit2", "SL_Visit2", "SM_Visit2", "SH_Visit2")),~coalesce(., 0)) # change all NA's to 0
+
+all_merged_utm$infestation_sum_Visit2_focal <- all_merged_utm$NL_Visit2 + all_merged_utm$NM_Visit2 + all_merged_utm$NH_Visit2 + all_merged_utm$SL_Visit2 + all_merged_utm$SM_Visit2 + all_merged_utm$SH_Visit2
+
+```
+
+# Infestation as a binary
+
+```{r}
+# Time 1
+all_merged_utm$`Inf Location_Visit1`[ all_merged_utm$`Inf Location_Visit1`== "-"] <- 0
+all_merged_utm$`Inf Location_Visit1`[all_merged_utm$`Inf Location_Visit1` == "BO" | all_merged_utm$`Inf Location_Visit1` == "BR, BO" | all_merged_utm$`Inf Location_Visit1` == "BR"] <- 1
+all_merged_utm$`Inf Location_Visit1`[is.na(all_merged_utm$`Inf Location_Visit1`)] <- 0 # change NA's to 0
+all_merged_utm$`Inf Location_Visit1` <- as.numeric(all_merged_utm$`Inf Location_Visit1`)
+unique(all_merged_utm$`Inf Location_Visit1`)
+# Time 2
+all_merged_utm$`Inf Location_Visit2`[ all_merged_utm$`Inf Location_Visit2`== "-"] <- 0
+all_merged_utm$`Inf Location_Visit2`[all_merged_utm$`Inf Location_Visit2` == "BO" | all_merged_utm$`Inf Location_Visit2` == "BR, BO" | all_merged_utm$`Inf Location_Visit2` == "BR"] <- 1
+all_merged_utm$`Inf Location_Visit2`[is.na(all_merged_utm$`Inf Location_Visit2`)] <- 0 # change NA's to 0
+all_merged_utm$`Inf Location_Visit2` <- as.numeric(all_merged_utm$`Inf Location_Visit2`)
+unique(all_merged_utm$`Inf Location_Visit2`)
+
+```
+
+# Function to extract info from target trees
+
+```{r}
+
+# # Change names to make easier
+# names(all_merged_utm)[12] <- "dead_alive"
+# names(all_merged_utm)[13] <- "infested_1"
+# names(all_merged_utm)[15] <- "brooms"
+# names(all_merged_utm)[39] <- "infested_2"
+# 
+# # Recode some things for extraction
+# all_merged_utm$Species_Visit1 <- as.factor(all_merged_utm$Species_Visit1)
+# 
+# # Make things!
+# 
+# # BA in cubed meters or something
+# all_merged_utm$DBH_Visit1 <- all_merged_utm$DBH_Visit1 * 2.54 # convert DBH to cm
+# all_merged_utm <- mutate(all_merged_utm, BA = (0.00007854 * (DBH_Visit1 ^ 2)))
+# 
+# # Crown Height in meters
+# all_merged_utm$crown_height <- (all_merged_utm$Height_Visit1 - all_merged_utm$`Canopy Height_Visit1`) * 0.3048
+# 
+# # Get all trees under 10m from focal tree
+# under10_holder <- holder_new.dt[,.(TARGET, DISTANCE), by=.(unique_ID)][,.SD[which(DISTANCE <= 10 & DISTANCE != 0)], by=.(unique_ID)]
+# 
+# df <- under10_holder
+# # Create a function to extract the variable based on the linked tree ID
+# extractVariable <- function(TARGET, variable) {
+#   linkedTreeRow <- all_merged_utm[all_merged_utm$unique_ID == TARGET, ]
+#   if (nrow(linkedTreeRow) > 0) {
+#     return(linkedTreeRow[[variable]])
+#   } else {
+#     return(NA)  # or any other value to indicate missing data
+#   }
+# }
+# 
+# str(all_merged_utm)
+# 
+# # Apply the function to create a new column with the extracted variable - need to change function for each extraction !!
+# df$infestation_under10 <- sapply(df$TARGET, extractVariable, variable = "infested_1")
+# df$infestation.sum.1_under10 <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_Visit1_focal")
+# df$dbh_under10 <- sapply(df$TARGET, extractVariable, variable = "DBH_Visit1")
+# df$brooms_under10 <- sapply(df$TARGET, extractVariable, variable = "brooms")
+# df$gouting_under10 <- sapply(df$TARGET, extractVariable, variable = "Gouting_Visit1")
+# df$species_under10 <- sapply(df$TARGET, extractVariable, variable = "Species_Visit1")
+# df$BA_under10 <- sapply(df$TARGET, extractVariable, variable = "BA")
+# df$crown_ht__under10 <- sapply(df$TARGET, extractVariable, variable = "crown_height")
+# df$dead_alive <- sapply(df$TARGET, extractVariable, variable = "dead_alive")
+# 
+# # Host and non-host BA
+# df$host_non <- if_else(df$species_under10 == "ABLA", 1, 0)
+# 
+# # create a summary table of local stats for each tree
+# local.stats <- df %>% 
+#   dplyr::group_by(unique_ID) %>% 
+#   dplyr::summarise(n = n(),
+#                    number.infested_under10 = sum(infestation_under10), # number of infested
+#                    percent.infested_under10 = (sum(infestation_under10)/n) * 100, # percent infested
+#                    infestation.sum_under10 = sum(infestation.sum.1_under10), # infestation load or propagule pressure
+#                    average.dbh_under10 = mean(dbh_under10, na.rm = TRUE), # average dbh
+#                    brooms_under10 = sum(brooms_under10), # number of brooms (this may not be anything)
+#                    # avg.gouting_under10 = mean(gouting_under10, na.rm = TRUE), # Since we only have 1's at EMIG, average isn't useful
+#                    gouting.sum_under = sum(gouting_under10, na.rm = TRUE), # gouting sum
+#                    basal_area_non_host = sum(BA_under10[!is.na(host_non) & host_non != 1], na.rm = TRUE), # non-host BA
+#                    basal_area_host = sum(BA_under10[host_non == 1], na.rm = TRUE), # host BA
+#                    percent_basal_area_non_host = basal_area_non_host / (basal_area_non_host + basal_area_host) * 100, # percent BA of non-host
+#                    crown_ht_sum = sum(crown_ht__under10, na.rm = TRUE),
+#                    mean_distance_infested = ifelse(sum(infestation_under10) == 0, NA, mean(DISTANCE[infestation_under10 == 1], na.rm = TRUE))) # If there's no infestation within 10m, it'll come out as NA 
+# 
+# names(local.stats)[1] <- "unique_ID"
+# 
+# # combine with data
+# data_with_local_stats <- all_merged_utm %>% inner_join(local.stats, by = "unique_ID")
+# 
+# # append nearest infested neighbor distance
+# data_with_local_stats <- inner_join(data_with_local_stats, min_dist_holder, by = "unique_ID")
+# 
+# write_xlsx(data_with_local_stats, "all_trees_data_under10m.xlsx")
+
+data_with_local_stats <- read_xlsx("all_trees_data_under10m.xlsx")
+```
+
+# GLMM with site as RE
+
+```{r}
+
+# just load in data from above to skip allocation of df from previous chunk (takes a long time)
+# glm_data <- read_xlsx("/Big Glm/all_trees_data_under10m.xlsx")
+# check covariates and transform
+
+host_data <- data_with_local_stats %>% filter(Species_Visit1 == "ABLA")
+
+host_data$infest_sum_10_std <- (host_data$infestation.sum_under10 - mean(host_data$infestation.sum_under10))/sd(host_data$infestation.sum_under10)
+host_data$basal_area_host_std <- (host_data$basal_area_host - mean(host_data$basal_area_host))/sd(host_data$basal_area_host)
+
+hist(data_with_local_stats$mean_distance_infested)
+
+# Look for NA's
+
+sum(is.na(host_data$DISTANCE))
+sum(is.na(host_data$DBH_Visit1))
+sum(is.na(host_data$Gouting_Visit1))
+sum(is.na(host_data$brooms))
+sum(is.na(host_data$number.infested_under10))
+sum(is.na(host_data$percent.infested_under10))
+sum(is.na(host_data$infestation.sum_under10))
+sum(is.na(host_data$average.dbh_under10))
+sum(is.na(host_data$basal_area_non_host))
+sum(is.na(host_data$percent_basal_area_non_host))
+sum(is.na(host_data$mean_distance_infested))
+
+# Deal with NA's
+host_data$DBH_Visit1[is.na(host_data$DBH_Visit1)] <- 0.5 # Change DBH to 0.5 to include clumps
+host_data$Gouting_Visit1[is.na(host_data$Gouting_Visit1)] <- 0 # change NA's to 0
+host_data <- host_data[!is.na(host_data$mean_distance_infested), ]
+
+# Take out TMPF becasue of lack of points
+
+host_data <- host_data %>% filter(host_data$Site != "TMPF")
+
+
+inf.glmm <- glmmTMB(cbind(infested_1, 1 - infested_1) ~ log(DISTANCE) + log(DBH_Visit1) + Gouting_Visit1 + brooms + log(number.infested_under10) + log(percent.infested_under10) + log(infestation.sum_under10) + log(average.dbh_under10) + mean_distance_infested + (1|Site), data = host_data, family = binomial(link = "logit"))
+
+inf.sims <- simulateResiduals(inf.glmm)
+plot(inf.sims)
+
+summary(inf.glmm)
+
+r2 <- r.squaredGLMM(inf.glmm)
+
+stepAIC(inf.glmm)
+
+inf.glmm.nore <- glmmTMB(cbind(infested_1, 1 - infested_1) ~ log(DISTANCE) + log(DBH_Visit1) + Gouting_Visit1 + brooms + log(number.infested_under10) + log(percent.infested_under10) + log(infestation.sum_under10) + log(average.dbh_under10) + basal_area_host + mean_distance_infested, data = host_data, family = binomial(link = "logit"))
+
+inf.sims.nore <- simulateResiduals(inf.glmm.nore)
+plot(inf.sims.nore)
+
+summary(inf.glmm.nore)
+
+# Take out non-significant variables
+
+inf.glmm.clean <- glmmTMB(cbind(infested_1, 1 - infested_1) ~ log(DISTANCE) + log(DBH_Visit1) + Gouting_Visit1 + brooms + log(infestation.sum_under10) + mean_distance_infested + (1|Site), data = host_data, family = binomial(link = "logit"))
+
+inf.sims.clean <- simulateResiduals(inf.glmm.clean)
+plot(inf.sims.clean)
+
+summary(inf.glmm)
+summary(inf.glmm.clean)
+
+r2.clean <- r.squaredGLMM(inf.glmm)
+r2.clean
+```
+
+# GLMM with newly infested
+
+```{r}
+# Make newly infested column
+host_data$newly_infested <- if_else(host_data$infested_1 == 0 & host_data$infested_2 == 1, 1, 0)
+
+inf.glmm.newly.infested <- glmmTMB(cbind(newly_infested, 1 - newly_infested) ~ log(DISTANCE) + log(DBH_Visit1) + Gouting_Visit1 + brooms + log(number.infested_under10) + log(percent.infested_under10) + log(infestation.sum_under10) + log(average.dbh_under10) + basal_area_host + mean_distance_infested + (1|Site), data = host_data, family = binomial(link = "logit"))
+
+inf.sims.newly <- simulateResiduals(inf.glmm.newly.infested)
+plot(inf.sims.newly)
+
+summary(inf.glmm.newly.infested)
+
+```

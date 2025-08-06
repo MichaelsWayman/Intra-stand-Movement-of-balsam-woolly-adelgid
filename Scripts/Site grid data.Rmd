@@ -1,0 +1,999 @@
+---
+title: "Gridded Data"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Local Gridded Data
+2/23/24
+Michael Wayman
+
+The purpose of this script is to get host data gridded from ArcGIS Pro and calculate statistics for each site. Mainly, we want to look at infestation prevalence and intesity over the sites and see if it aligns with our finding for all sites. We'll work with our host data in ArcGIS Pro to get a grid put on it and then we'll get it imported here for summary stats.
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# clean out environment
+
+```{r}
+rm(list = ls())
+
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+library(raster) # for moving window analysis
+
+```
+
+## Load data
+
+```{r}
+
+all_data <- read_xlsx("all_sites_with_points.xlsx")
+trees <- read_xlsx("data_with_nearest_info.xlsx")
+
+```
+
+# Filter and make files for ArcGIS (Only once*)
+
+```{r}
+trees$tree_ID <- paste(trees$tag, trees$species, sep = "")
+cxsp <- trees %>% dplyr::filter(site == "CXSP")
+emig <- trees %>% dplyr::filter(site == "EMIG")
+frnk <- trees %>% dplyr::filter(site == "FRNK")
+mocr <- trees %>% dplyr::filter(site == "MOCR")
+mttp <- trees %>% dplyr::filter(site == "MTTP")
+smmh <- trees %>% dplyr::filter(site == "SMMH")
+soap <- trees %>% dplyr::filter(site == "SOAP")
+tmpf <- trees %>% dplyr::filter(site == "TMPF")
+
+
+   # write.csv(cxsp, "cxsp_all.csv")
+   # write.csv(emig, "emig_all.csv")
+   # write.csv(frnk, "frnk_all.csv")
+   # write.csv(mocr, "mocr_all.csv")
+   # write.csv(mttp, "mttp_all.csv")
+   # write.csv(smmh, "smmh_all.csv")
+   # write.csv(soap, "soap_all.csv")
+   # write.csv(tmpf, "tmpf_all.csv")
+
+emig.grid <- read_xlsx("emig_grid_all.xlsx")
+cxsp.grid <- read_xlsx("cxsp_grid_all.xlsx")
+frnk.grid <- read_xlsx("frnk_grid_all.xlsx")
+mocr.grid <- read_xlsx("mocr_grid_all.xlsx")
+mttp.grid <- read_xlsx("mttp_grid_all.xlsx")
+smmh.grid <- read_xlsx("smmh_grid_all.xlsx")
+soap.grid <- read_xlsx("soap_grid_all.xlsx")
+tmpf.grid <- read_xlsx("tmpf_grid_all.xlsx")
+
+```
+
+# Cox Springs - visit 1
+
+```{r}
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.cxsp <- cxsp %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(cxsp.grid)[37] <- "tree_ID"
+cxsp.grid <- cxsp.grid %>% inner_join(infest_variables.cxsp, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+cxsp.grid <- cxsp.grid[cxsp.grid$Join_Count != 0,]
+
+cxsp.grid$JOIN_FID <- as.factor(cxsp.grid$JOIN_FID)
+prev_intensity_table.cxsp <- cxsp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "cxsp")
+
+ggplot(prev_intensity_table.cxsp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.cxsp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+```
+
+# Cox Springs - visit 2
+
+```{r}
+prev_intensity_table_2.cxsp <- cxsp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "cxsp")
+
+ggplot(prev_intensity_table_2.cxsp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.cxsp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+```
+
+# Cox Springs - visit 3
+
+```{r}
+prev_intensity_table_3.cxsp <- cxsp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "cxsp")
+
+ggplot(prev_intensity_table_3.cxsp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.cxsp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+```
+
+# Cox Springs - visit 4
+
+```{r}
+prev_intensity_table_4.cxsp <- cxsp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "cxsp")
+
+ggplot(prev_intensity_table_4.cxsp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.cxsp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+```
+
+# Emigration Canyon - Visit 1
+
+```{r}
+
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.emig <- emig %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(emig.grid)[37] <- "tree_ID"
+emig.grid <- emig.grid %>% inner_join(infest_variables.emig, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+emig.grid <- emig.grid[emig.grid$Join_Count != 0,]
+
+emig.grid$JOIN_FID <- as.factor(emig.grid$JOIN_FID)
+prev_intensity_table.emig <- emig.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "emig")
+
+ggplot(prev_intensity_table.emig, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.emig, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+
+# Emigration Canyon - Visit 2
+
+```{r}
+prev_intensity_table_2.emig <- emig.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "emig")
+
+ggplot(prev_intensity_table_2.emig, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.emig, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Emigration Canyon - Visit 3
+
+```{r}
+prev_intensity_table_3.emig <- emig.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "emig")
+
+ggplot(prev_intensity_table_3.emig, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.emig, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Emigration Canyon - Visit 4
+
+```{r}
+prev_intensity_table_4.emig <- emig.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "emig")
+
+ggplot(prev_intensity_table_4.emig, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.emig, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Franklin Basin - visit 1
+
+```{r}
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.frnk <- frnk %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(frnk.grid)[37] <- "tree_ID"
+frnk.grid <- frnk.grid %>% inner_join(infest_variables.frnk, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+frnk.grid <- frnk.grid[frnk.grid$Join_Count != 0,]
+
+frnk.grid$JOIN_FID <- as.factor(frnk.grid$JOIN_FID)
+prev_intensity_table.frnk <- frnk.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "frnk")
+
+ggplot(prev_intensity_table.frnk, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.frnk, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+
+# Franklin Basin - visit 2
+
+```{r}
+prev_intensity_table_2.frnk <- frnk.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "frnk")
+
+ggplot(prev_intensity_table_2.frnk, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.frnk, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Franklin Basin - visit 3
+
+```{r}
+prev_intensity_table_3.frnk <- frnk.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "frnk")
+
+ggplot(prev_intensity_table_3.frnk, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_2.frnk, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Franklin Basin - visit 4
+
+```{r}
+prev_intensity_table_4.frnk <- frnk.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "frnk")
+
+ggplot(prev_intensity_table_4.frnk, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.frnk, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Monte Cristo - Visit 1
+
+```{r}
+
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.mocr <- mocr %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(mocr.grid)[37] <- "tree_ID"
+mocr.grid <- mocr.grid %>% inner_join(infest_variables.mocr, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+mocr.grid <- mocr.grid[mocr.grid$Join_Count != 0,]
+
+mocr.grid$JOIN_FID <- as.factor(mocr.grid$JOIN_FID)
+prev_intensity_table.mocr <- mocr.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "mocr")
+
+ggplot(prev_intensity_table.mocr, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.mocr, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+
+# Monte Cristo - Visit 2
+
+```{r}
+
+prev_intensity_table_2.mocr <- mocr.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "mocr")
+
+ggplot(prev_intensity_table_2.mocr, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.mocr, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Monte Cristo - Visit 3
+
+```{r}
+
+prev_intensity_table_3.mocr <- mocr.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "mocr")
+
+ggplot(prev_intensity_table_3.mocr, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.mocr, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Monte Cristo - Visit 4
+
+```{r}
+
+prev_intensity_table_4.mocr <- mocr.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "mocr")
+
+ggplot(prev_intensity_table_4.mocr, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.mocr, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Mount Timpanogos - Visit 1
+
+```{r}
+
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.mttp <- mttp %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(mttp.grid)[37] <- "tree_ID"
+mttp.grid <- mttp.grid %>% inner_join(infest_variables.mttp, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+mttp.grid <- mttp.grid[mttp.grid$Join_Count != 0,]
+
+mttp.grid$JOIN_FID <- as.factor(mttp.grid$JOIN_FID)
+prev_intensity_table.mttp <- mttp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "mttp")
+
+ggplot(prev_intensity_table.mttp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.mttp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+# Mount Timpanogos - Visit 2
+
+```{r}
+
+prev_intensity_table_2.mttp <- mttp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "mttp")
+
+ggplot(prev_intensity_table_2.mttp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.mttp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Mount Timpanogos - Visit 3
+
+```{r}
+
+prev_intensity_table_3.mttp <- mttp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "mttp")
+
+ggplot(prev_intensity_table_3.mttp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.mttp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Mount Timpanogos - Visit 4
+
+```{r}
+
+prev_intensity_table_4.mttp <- mttp.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "mttp")
+
+ggplot(prev_intensity_table_4.mttp, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.mttp, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Smith and Morehouse - Visit 1
+
+```{r}
+
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.smmh <- smmh %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(smmh.grid)[37] <- "tree_ID"
+smmh.grid <- smmh.grid %>% inner_join(infest_variables.smmh, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+smmh.grid <- smmh.grid[smmh.grid$Join_Count != 0,]
+
+smmh.grid$JOIN_FID <- as.factor(smmh.grid$JOIN_FID)
+prev_intensity_table.smmh <- smmh.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "smmh")
+
+ggplot(prev_intensity_table.smmh, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.smmh, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+
+# Smith and Morehouse - Visit 2
+
+```{r}
+
+prev_intensity_table_2.smmh <- smmh.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "smmh")
+
+ggplot(prev_intensity_table_2.smmh, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.smmh, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Smith and Morehouse - Visit 3
+
+```{r}
+
+prev_intensity_table_3.smmh <- smmh.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "smmh")
+
+ggplot(prev_intensity_table_3.smmh, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.smmh, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Smith and Morehouse - Visit 4
+
+```{r}
+
+prev_intensity_table_4.smmh <- smmh.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "smmh")
+
+ggplot(prev_intensity_table_4.smmh, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.smmh, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Soapstone Basin - Visit 1
+
+```{r}
+
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.soap <- soap %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(soap.grid)[37] <- "tree_ID"
+soap.grid <- soap.grid %>% inner_join(infest_variables.soap, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+soap.grid <- soap.grid[soap.grid$Join_Count != 0,]
+
+soap.grid$JOIN_FID <- as.factor(soap.grid$JOIN_FID)
+prev_intensity_table.soap <- soap.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "soap")
+
+ggplot(prev_intensity_table.soap, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.soap, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+
+# Soapstone Basin - Visit 2
+
+```{r}
+
+prev_intensity_table_2.soap <- soap.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "soap")
+
+ggplot(prev_intensity_table_2.soap, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.soap, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Soapstone Basin - Visit 3
+
+```{r}
+
+prev_intensity_table_3.soap <- soap.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "soap")
+
+ggplot(prev_intensity_table_3.soap, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.soap, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Soapstone Basin - Visit 4
+
+```{r}
+
+prev_intensity_table_4.soap <- soap.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "soap")
+
+ggplot(prev_intensity_table_4.soap, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.soap, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Temple Fork - Visit 1
+
+```{r}
+
+# There was a problem with not having infestation sum in the data when we did the grid combination, we'll apend the data here
+infest_variables.tmpf <- tmpf %>% dplyr::select(c("tree_ID", "infestation_sum_Visit1_focal", "infestation_sum_Visit2_focal", "infestation_sum_Visit3_focal", "infestation_sum_Visit4_focal", "infestation_visit_1", "infestation_visit_2", "infestation_visit_3", "infestation_visit_4"))
+names(tmpf.grid)[37] <- "tree_ID"
+tmpf.grid <- tmpf.grid %>% inner_join(infest_variables.tmpf, by = "tree_ID")
+
+# Get rid of quadrats with nothing in them
+tmpf.grid <- tmpf.grid[tmpf.grid$Join_Count != 0,]
+
+tmpf.grid$JOIN_FID <- as.factor(tmpf.grid$JOIN_FID)
+prev_intensity_table.tmpf <- tmpf.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_1)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit1_focal),
+                               infestation_sum = sum(infestation_sum_Visit1_focal),
+                               site = "tmpf")
+
+ggplot(prev_intensity_table.tmpf, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 1")
+
+ggplot(prev_intensity_table.tmpf, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 1")
+
+```
+
+# Temple Fork - Visit 2
+
+```{r}
+
+prev_intensity_table_2.tmpf <- tmpf.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_2)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit2_focal),
+                               infestation_sum = sum(infestation_sum_Visit2_focal),
+                               site = "tmpf")
+
+ggplot(prev_intensity_table_2.tmpf, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 2")
+
+ggplot(prev_intensity_table_2.tmpf, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 2")
+
+```
+
+# Temple Fork - Visit 3
+
+```{r}
+
+prev_intensity_table_3.tmpf <- tmpf.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_3)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit3_focal),
+                               infestation_sum = sum(infestation_sum_Visit3_focal),
+                               site = "tmpf")
+
+ggplot(prev_intensity_table_3.tmpf, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 3")
+
+ggplot(prev_intensity_table_3.tmpf, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 3")
+
+```
+
+# Temple Fork - Visit 4
+
+```{r}
+
+prev_intensity_table_4.tmpf <- tmpf.grid %>% dplyr::group_by(JOIN_FID) %>%
+                    dplyr::summarize(prevalence = sum(infestation_visit_4)/n() * 100,
+                               infestation_mean = mean(infestation_sum_Visit4_focal),
+                               infestation_sum = sum(infestation_sum_Visit4_focal),
+                               site = "tmpf")
+
+ggplot(prev_intensity_table_4.tmpf, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells - Visit 4")
+
+ggplot(prev_intensity_table_4.tmpf, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Visit 4")
+
+```
+
+# Combine all to graph on same plot - Visit 1
+
+```{r}
+
+prev_intensity_table.all <- rbind(prev_intensity_table.cxsp, prev_intensity_table.emig,prev_intensity_table.frnk, prev_intensity_table.mocr, prev_intensity_table.mttp, prev_intensity_table.smmh, prev_intensity_table.soap, prev_intensity_table.tmpf)
+
+prev_intensity_table.all$site <- as.factor(prev_intensity_table.all$site)
+
+# All sites infestation mean plotted together
+ggplot(prev_intensity_table.all, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together
+ggplot(prev_intensity_table.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together with logged y-axis
+ggplot(prev_intensity_table.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Logged y-axis") +
+  facet_wrap(~ site, scales = "fixed") +
+  scale_y_continuous(trans = "log10")
+
+```
+
+# Combine all to graph on same plot - Visit 2
+
+```{r}
+
+prev_intensity_table_2.all <- rbind(prev_intensity_table_2.cxsp, prev_intensity_table_2.emig,prev_intensity_table_2.frnk, prev_intensity_table_2.mocr, prev_intensity_table_2.mttp, prev_intensity_table_2.smmh, prev_intensity_table_2.soap, prev_intensity_table_2.tmpf)
+
+prev_intensity_table_2.all$site <- as.factor(prev_intensity_table_2.all$site)
+
+# All sites infestation mean plotted together
+ggplot(prev_intensity_table_2.all, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together
+ggplot(prev_intensity_table_2.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together with logged y-axis
+ggplot(prev_intensity_table_2.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Logged y-axis") +
+  facet_wrap(~ site, scales = "fixed") +
+  scale_y_continuous(trans = "log10")
+
+```
+
+# Combine all to graph on same plot - Visit 3
+
+```{r}
+
+prev_intensity_table_3.all <- rbind(prev_intensity_table_3.cxsp, prev_intensity_table_3.emig,prev_intensity_table_3.frnk, prev_intensity_table_3.mocr, prev_intensity_table_3.mttp, prev_intensity_table_3.smmh, prev_intensity_table_3.soap, prev_intensity_table_3.tmpf)
+
+prev_intensity_table_3.all$site <- as.factor(prev_intensity_table_3.all$site)
+
+# All sites infestation mean plotted together
+ggplot(prev_intensity_table_3.all, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together
+ggplot(prev_intensity_table_3.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together with logged y-axis
+ggplot(prev_intensity_table_3.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Logged y-axis") +
+  facet_wrap(~ site, scales = "fixed") +
+  scale_y_continuous(trans = "log10")
+
+```
+
+# Combine all to graph on same plot - Visit 4
+
+```{r}
+
+prev_intensity_table_4.all <- rbind(prev_intensity_table_4.cxsp, prev_intensity_table_4.emig,prev_intensity_table_4.frnk, prev_intensity_table_4.mocr, prev_intensity_table_4.mttp, prev_intensity_table_4.smmh, prev_intensity_table_4.soap, prev_intensity_table_4.tmpf)
+
+prev_intensity_table_4.all$site <- as.factor(prev_intensity_table_4.all$site)
+
+# All sites infestation mean plotted together
+ggplot(prev_intensity_table_4.all, aes(x = prevalence, y = infestation_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation mean", title = "Infestation percent by tree count vs infestation mean for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together
+ggplot(prev_intensity_table_4.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells") +
+  facet_wrap(~ site, scales = "fixed")
+
+# All sites infestation sum plotted together with logged y-axis
+ggplot(prev_intensity_table_4.all, aes(x = prevalence, y = infestation_sum)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Percent infestation by tree count", y = "Infestation sum", title = "Infestation percent by tree count vs infestation sum for grid cells - Logged y-axis") +
+  facet_wrap(~ site, scales = "fixed") +
+  scale_y_continuous(trans = "log10")
+
+```

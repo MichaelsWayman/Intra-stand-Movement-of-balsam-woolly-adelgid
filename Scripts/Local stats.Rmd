@@ -1,0 +1,278 @@
+---
+title: "Local Statistics"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+New Infested Trees
+3/1/23 * approx date
+Michael Wayman
+
+The goal of this script is to look at our newly infested trees at each plot and what characteristics may be playing a part in their transition. We'll look at all of our variables that we've collected and see if any of them correlate with being infested for the first time. For most of the script, we'll just be using our measured variables excluding spatial aspects. At the end, we may try to incorporate the spatial element and see how that changes things. Let's do it!
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(rfishnet2)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(plyr)
+library(reshape2)
+library(geosphere)
+library(data.table)
+library(writexl)
+```
+
+## Clean out global environment
+
+```{r}
+rm(list = ls())
+```
+
+## Load Data
+
+```{r}
+combined <- read_xlsx("data_with_bearings.xlsx")
+```
+
+## Final Solution to distances
+
+
+```{r}
+
+# So we need to convert our decimel degrees to UTM for calculation
+all_merged <- combined
+
+# Convert to sf
+all_merged_sf <- st_as_sf(all_merged, coords = c("Longitude.focal", "Latitude.focal"), crs = 4326)
+
+# Define the target UTM zone
+target_crs <- 32612  # EPSG code for UTM zone 12
+
+# Transform the coordinates
+all_merged_utm <- st_transform(all_merged_sf, crs = target_crs)
+all_coords <- st_coordinates(all_merged_utm)
+all_coords <- as.data.frame(all_coords)
+
+# Put back into original datframe
+
+all_merged_utm <- all_merged
+all_merged_utm$Longitude.focal <- all_coords$X
+all_merged_utm$Latitude.focal <- all_coords$Y
+
+#all_merged_utm$unique_ID <- paste(all_merged_utm$site, all_merged_utm$`Tag #`, rownames(all_merged_utm), sep = "_")
+
+all_infested <- all_merged_utm[all_merged_utm$infestation_visit_1 == 1, ] # Infested trees with UTM coordinates
+
+
+#write_clip(all_merged_utm) # copy dataframe without making file
+all_merged <- all_merged_utm[!duplicated(all_merged_utm$unique_ID), ] #- there shouldn't be duplicates now
+rownames(all_merged) <- all_merged$unique_ID
+
+# change crown height NA's to zero
+all_merged$canopy_ht[is.na(all_merged$canopy_ht)] <- 0
+
+rm(Holder)
+Holder = as.data.frame(matrix(nrow=0,ncol=4)) 
+colnames(Holder) =c("PLOT", "FROM", "TARGET", "DISTANCE")
+
+#Assign rownames as Tree-ID, dataset also needs UTM_X, UTM_Y, and PLOT
+for( i in levels(as.factor(all_merged$site))){
+  subset_frame = subset(all_merged, site == i)
+TEMP_DIST = vegdist(subset_frame[,c("Longitude.focal","Latitude.focal")], method = "euclid")
+TEMP_DIST.df = as.data.frame(as.matrix(TEMP_DIST))
+rownames(TEMP_DIST.df) = (subset_frame$unique_ID)
+colnames(TEMP_DIST.df) = (subset_frame$unique_ID)
+TEMP_DIST.df$`Tag #` = rownames(TEMP_DIST.df)
+TEMP_DIST_MELT = reshape2::melt(TEMP_DIST.df, id.vars = c("Tag #"))
+colnames(TEMP_DIST_MELT) = c("FROM", "TARGET", "DISTANCE")
+#Make a new column with plot ID
+TEMP_DIST_MELT$PLOT = i
+Holder = rbind(Holder, TEMP_DIST_MELT) #This is your exit
+}
+
+#Merge with infestation data
+names(Holder)[1] <- "unique_ID"
+
+Holder_new <- merge(Holder, all_merged_utm, by.x = "TARGET", by.y = "unique_ID")
+holder_new.dt <- as.data.table(Holder_new)
+length(unique(holder_new.dt$unique_ID))
+nrow(holder_new.dt)
+names(holder_new.dt)[12] <- "infested_1"
+names(holder_new.dt)[39] <- "infested_2"
+library(data.table)
+#min_dist_holder <- holder_new.dt[`infested` == 1 & (DISTANCE == min(DISTANCE[(DISTANCE != 0)])) ,.(DISTANCE, TARGET),by=.("unique_ID")]
+
+# Get all trees under 10m from focal tree
+under10_holder <- holder_new.dt[,.(TARGET, DISTANCE.x), by=.(unique_ID)][,.SD[which(DISTANCE.x <= 10 & DISTANCE.x != 0)], by=.(unique_ID)]
+
+# add distances to data
+# visit 1 distances
+#data_with_nearest_infested_dis <- all_merged_utm %>% inner_join(min_dist_holder, by = "unique_ID")
+
+#write_xlsx(data_with_nearest_infested_dis,"C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/data_with_nearest_infested.xlsx")
+
+```
+
+# Function to extract info from target trees
+
+```{r}
+# Infestation sum because its not here for some reason
+all_merged_utm$infestation_sum_v1 <- all_merged_utm$NL_v1 + all_merged_utm$NM_v1 + all_merged_utm$NH_v1 + all_merged_utm$SL_v1 + all_merged_utm$SM_v1 + all_merged_utm$SH_v1
+
+all_merged_utm$infestation_sum_v2 <- all_merged_utm$NL_v2 + all_merged_utm$NM_v2 + all_merged_utm$NH_v2 + all_merged_utm$SL_v2 + all_merged_utm$SM_v2 + all_merged_utm$SH_v2
+
+all_merged_utm$infestation_sum_v3 <- all_merged_utm$NL_v3 + all_merged_utm$NM_v3 + all_merged_utm$NH_v3 + all_merged_utm$SL_v3 + all_merged_utm$SM_v3 + all_merged_utm$SH_v3
+
+all_merged_utm$infestation_sum_v4 <- all_merged_utm$NL_v4 + all_merged_utm$NM_v4 + all_merged_utm$NH_v4 + all_merged_utm$SL_v4 + all_merged_utm$SM_v4 + all_merged_utm$SH_v4
+
+# New way to do this
+all_merged_utm$dbh <- all_merged_utm$dbh * 2.54 # convert DBH to cm
+all_merged_utm <- mutate(all_merged_utm, BA = (0.00007854 * (dbh ^ 2)))
+
+df <- under10_holder
+# Create a function to extract the variable based on the linked tree ID
+extractVariable <- function(TARGET, variable) {
+  linkedTreeRow <- all_merged_utm[all_merged_utm$unique_ID == TARGET, ]
+  if (nrow(linkedTreeRow) > 0) {
+    return(linkedTreeRow[[variable]])
+  } else {
+    return(NA)  # or any other value to indicate missing data
+  }
+}
+
+str(all_merged_utm)
+
+# Apply the function to create a new column with the extracted variable - need to change function for each extraction !!
+df$infestation_under10 <- sapply(df$TARGET, extractVariable, variable = "infestation_visit_1")
+df$infestation.sum.1_under10 <- sapply(df$TARGET, extractVariable, variable = "infestation_sum_v1")
+df$dbh_under10 <- sapply(df$TARGET, extractVariable, variable = "dbh")
+df$brooms_under10 <- sapply(df$TARGET, extractVariable, variable = "brooms")
+df$gouting_under10 <- sapply(df$TARGET, extractVariable, variable = "Gouting_v1")
+df$species_under10 <- sapply(df$TARGET, extractVariable, variable = "species")
+df$BA_under10 <- sapply(df$TARGET, extractVariable, variable = "BA")
+df$crown_ht__under10 <- sapply(df$TARGET, extractVariable, variable = "canopy_ht")
+df$dead_alive <- sapply(df$TARGET, extractVariable, variable = "Dead / Alive_v1")
+
+#combined$
+# Need to run this to get rid of duplicates before extracting DBH's
+#df <- df %>%
+      #distinct(unique_ID, .keep_all = TRUE)
+
+# Apply the function to create a new column with the extracted variable - need to change function for each extraction !!
+# df$infestation_under10 <- sapply(df$TARGET, extractVariable)
+# df$infestation.sum.1_under10 <- sapply(df$TARGET, extractVariable)
+# df$dbh_under10 <- sapply(df$TARGET, extractVariable)
+# df$brooms_under10 <- sapply(df$TARGET, extractVariable)
+# df$gouting_under10 <- sapply(df$TARGET, extractVariable)
+
+# create a summary table of local stats for each tree
+local.stats <- df %>% 
+  dplyr::group_by(unique_ID) %>% 
+  dplyr::summarise(n = n(),
+                   number.infested_under10 = sum(infestation_under10),
+                   percent.infested_under10 = (sum(infestation_under10)/n) * 100,
+                   infestation.sum_under10 = sum(infestation.sum.1_under10),
+                   average.dbh_under10 = mean(dbh_under10, na.rm = TRUE),
+                   brooms_under10 = sum(brooms_under10),
+                   avg.gouting_under10 = mean(gouting_under10, na.rm = TRUE),
+                   gouting.sum_under = sum(gouting_under10, na.rm = TRUE),
+                   avg_crown_ht_under_10 = mean(crown_ht__under10), na.rm = TRUE)
+
+
+
+# combine with data
+data_with_local_stats <- combined %>% inner_join(local.stats, by = "unique_ID")
+local <- data_with_local_stats
+
+library(writexl)
+
+#write_xlsx(data_with_local_stats, "under10m_data.xlsx")
+```
+
+# Modelling with local data
+
+## Histograms of local stats
+
+```{r}
+
+hist(local$n)
+hist(local$number.infested_under10)
+hist(local$percent.infested_under10) # use log percent infested
+hist(local$infestation.sum_under10) # use log infest sum
+hist(local$average.dbh_under10) # use log dbh
+hist(local$brooms_under10) # use log brooms
+hist(local$avg.gouting_under10)
+hist(local$gouting.sum_under) # use log gouting sum
+
+# Logs look better, but give us infinate values for all these categories, how do you deal with this??
+
+
+# Correlations
+cor(local[, c("n", "number.infested_under10", "percent.infested_under10", "infestation.sum_under10", "average.dbh_under10", "brooms_under10", "avg.gouting_under10", "gouting.sum_under")], use = "complete.obs")
+
+# Seems like the main one to avoid is number infested/infestation sum - let's use percent infested and infestation sum. By using percent, we get number infested when we input n.
+
+```
+
+## All sites newly infested
+
+```{r}
+# change infestation variable
+
+local.newinf <- glm(cbind(new_infestation, 1 - new_infestation) ~ n + percent.infested_under10 + infestation.sum_under10 + average.dbh_under10 + brooms_under10 + avg.gouting_under10 + gouting.sum_under, data = local, family = binomial(link = "logit"))
+
+local.new.sims <- simulateResiduals(local.newinf)
+plot(local.new.sims)
+
+summary(local.newinf)
+
+```
+
+## All sites - just infested vs not
+
+```{r}
+
+local.inf <- glm(cbind(infested_v1, 1 - infested_v1) ~ n + percent.infested_under10 + infestation.sum_under10 + average.dbh_under10 + brooms_under10 + avg.gouting_under10 + gouting.sum_under, data = local, family = binomial(link = "logit"))
+
+local.inf.sims <- simulateResiduals(local.inf)
+plot(local.inf.sims)
+
+summary(local.inf)
+```

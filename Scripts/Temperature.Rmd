@@ -1,0 +1,147 @@
+---
+title: "Temperature Data"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+```
+
+# Description
+
+Temperature Data
+1/22/24
+Michael Wayman
+
+The purpose of this script is to look at all the temperture data aquired so far, calculate desired variables, and potentially model temperature variables into the past. 
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# clean out environment
+
+```{r}
+rm(list = ls())
+
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(Matrix) # to use glmer
+library(lme4) # to use glmer
+
+```
+
+# Load data
+
+```{r}
+smmh_temp <- read_xlsx("BWA_SM 2023-08-16 09_27_05 MDT (Data MDT).xlsx")
+cxsp_temp <- read_xlsx("CXSP 2023-10-09 11_43_22 MDT (Data MDT).xlsx")
+emig_temp <- read_xlsx("EMIG 2023-10-26 11_26_10 MDT (Data MDT).xlsx")
+frnk_temp <- read_xlsx("FranklinBasin_BWA 2023-08-04 15_55_27 MDT (Data MDT).xlsx")
+mocr_temp <- read_xlsx("monte_cristo 2023-09-02 15_44_10 MDT (Data MDT).xlsx")
+mttp_temp <- read_xlsx("MTTP 2023-09-16 15_00_05 MDT (Data MDT).xlsx")
+soap_temp <- read_xlsx("SOAP 2023-08-21 17_19_28 MDT (Data MDT).xlsx")
+tmpf_temp <- read_xlsx("TMPF 2023-09-23 16_50_09 MDT (Data MDT).xlsx")
+```
+
+# Plot out each site's daily max and min over the field season
+
+```{r}
+
+# add site column, then combine our data
+smmh_temp$site <- "SMMH"
+cxsp_temp$site <- "CXSP"
+emig_temp$site <- "EMIG"
+frnk_temp$site <- "FRNK"
+mocr_temp$site <- "MOCR"
+mttp_temp$site <- "MTTP"
+soap_temp$site <- "SOAP"
+tmpf_temp$site <- "TMPF"
+
+temp_combined <- bind_rows(smmh_temp, cxsp_temp, emig_temp, frnk_temp, mocr_temp, mttp_temp, soap_temp, tmpf_temp)
+
+# Convert timestamp to date
+temp_combined$`Date-Time (MDT)` <- as.Date(temp_combined$`Date-Time (MDT)`)
+names(temp_combined)[2] <- "date"
+names(temp_combined)[3] <- "temp"
+
+
+# Get max and mins for each day
+daily_temps <- temp_combined %>%
+  dplyr::group_by(date, site) %>%
+  dplyr::summarise(min(temp),
+            max(temp))
+
+daily_temps$date <- as.Date(daily_temps$date)
+
+# Plot max's
+ggplot(daily_temps, aes(x = date, group = site)) +
+  geom_line(aes(y = daily_temps$`max(temp)`, color = site), linetype = "solid", size = 1) +
+  labs(title = "Daily Max Temperatures by Site",
+       x = "Date",
+       y = "Temperature",
+       color = "Site") +
+  theme_minimal() +
+  scale_color_discrete(name = "Site")
+
+# Plot Min's
+ggplot(daily_temps, aes(x = date, group = site)) +
+  geom_line(aes(y = daily_temps$`min(temp)`, color = site), linetype = "solid", size = 1) +
+  labs(title = "Daily Min Temperatures by Site",
+       x = "Date",
+       y = "Temperature",
+       color = "Site") +
+  theme_minimal() +
+  scale_color_discrete(name = "Site")
+
+# do this for time period where we have all values (~mid-June to September)
+
+june_to_sep_temps <- daily_temps %>% subset(date>"2023-06-15" & date<"2023-09-01")
+
+ggplot(june_to_sep_temps, aes(x = date, group = site)) +
+  geom_line(aes(y = june_to_sep_temps$`max(temp)`, color = site), linetype = "solid", size = 1) +
+  geom_line(aes(y = june_to_sep_temps$`min(temp)`, color = site), linetype = "solid", size = 1) +
+  labs(title = "Daily Max and Min Temperatures by Site - June to September",
+       x = "Date",
+       y = "Temperature",
+       color = "Site") +
+  theme_minimal() +
+  scale_color_discrete(name = "Site")
+
+```
+
+

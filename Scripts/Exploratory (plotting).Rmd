@@ -1,0 +1,413 @@
+---
+title: "Random things"
+author: "Michael Wayman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This scripts purpose is to be somewhere where I can do a bunch of random things. The first data object I'm bringing in is our data with local statistics at 8 meters, which is what I should be working with from now on, I'm hoping that instead of one distinct purpose, this is where I'll mix and match files from other markdowns to get what I want.
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# turn off annoying messages with this option
+knitr::opts_chunk$set(warning = T, error = T, message = F)
+knitr::opts_knit$set(root.dir = "~/Project Files/Analysis/Cleaning and Compilation/Cleaning")
+```
+
+# Set up
+
+## Directory
+
+```{r wd}
+getwd()
+# "C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning"
+```
+
+# Clean out environment
+
+```{r}
+rm(list = ls())
+```
+
+## Packages
+
+```{r packages, echo=F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tinytex)
+library(fastmap)
+library(pandoc)
+library(sf)
+library(spatstat)
+library(sp)
+library(gstat)
+library(spdep)
+library(geosphere)
+library(nngeo)
+library(vegan)
+library(clipr)
+library(reshape2)
+library(lme4) # to use glmer
+library(data.table)
+library(glmmTMB)
+library(DHARMa)
+library(MuMIn)
+```
+
+# Load data
+
+```{r}
+
+data <- read_xlsx("local_data_8.xlsx")
+
+```
+
+# New infestations vs infestation load
+
+I want to plot out what the overal infestation loads are at each site and plot that against new infestations at that plot. We expect that higher infestation loads will lead to more new infestations so let's see if that's true.
+
+
+```{r}
+
+data <- data %>% mutate(new_infestation = ifelse(infested_v1 == 0 & (infested_v2 == 1 | infested_v3 == 1 | infested_v4 == 1), 1, 0))
+
+data <- data %>% filter(`Dead / Alive_v1` == 1)
+
+count <- data %>% group_by(site) %>% filter(infested_v1 == 0) %>% count()
+
+infest_stats <- data %>% group_by(site) %>% dplyr::summarise(
+  perc_infested_v1 = (sum(infested_v1) / n()) * 100,
+  sum_newly_infested_v4 = sum(new_infestation)) %>% full_join(count, by = "site")
+
+infest_stats$perc_new_infested <- (infest_stats$sum_newly_infested_v4 / infest_stats$n) *100
+
+# plot 
+infest_plot <- ggplot(infest_stats, aes(x = perc_infested_v1, y = perc_new_infested, label = site)) +
+  geom_point(size = 3, color = "blue") +
+  geom_text_repel(size = 3) +
+  labs(
+    y = "Percentage of Newly Infested Trees (Whole Study)",
+    x = "Percentage of Infested Trees (Start of Study)",
+    title = "Infested vs Newly Infested Percentage"
+  ) +
+  theme_minimal()
+
+```
+
+# Summary statistic table for infested trees at each visit
+
+We'll create a summary table here looking at a couple things.
+
+First: We'll make a table that's infested trees vs non-infested trees at each visit that includes pretty much all the factors we're inculding in the models:
+
+- Distance to nearest infested
+- Distance to nearest infested over 1 in dbh
+- Average dbh of focal tree
+- local metrics
+- focal tree metrics
+
+```{r}
+names(data)[103] <- "TARGET_v1"
+names(data)[104] <- "DISTANCE_v1"
+names(data)[105] <- "TARGET_noclump_v1"
+names(data)[106] <- "DISTANCE_noclump_v1"
+names(data)[107] <- "TARGET_v2"
+names(data)[108] <- "DISTANCE_v2"
+names(data)[109] <- "TARGET_noclump_v2"
+names(data)[110] <- "DISTANCE_noclump_v2"
+names(data)[111] <- "TARGET_v3"
+names(data)[112] <- "DISTANCE_v3"
+names(data)[113] <- "TARGET_noclump_v3"
+names(data)[114] <- "DISTANCE_noclump_v3"
+names(data)[115] <- "TARGET_v4"
+names(data)[116] <- "DISTANCE_v4"
+names(data)[117] <- "TARGET_noclump_v4"
+names(data)[118] <- "DISTANCE_noclump_v4"
+names(data)[122] <- "n.infested_v1"
+names(data)[123] <- "n.infested_v2"
+names(data)[124] <- "n.infested_v3"
+names(data)[125] <- "n.infested_v4"
+names(data)[126] <- "perc.infested_v1"
+names(data)[127] <- "perc.infested_v2"
+names(data)[128] <- "perc.infested_v3"
+names(data)[129] <- "perc.infested_v4"
+names(data)[130] <- "infested_sum_v1"
+names(data)[131] <- "infested_sum_v2"
+names(data)[132] <- "infested_sum_v3"
+names(data)[133] <- "infested_sum_v4"
+names(data)[139] <- "mean_dist_infested_v1"
+names(data)[140] <- "mean_dist_infested_v2"
+names(data)[141] <- "mean_dist_infested_v3"
+names(data)[142] <- "mean_dist_infested_v4"
+
+data$height <- data$height * 0.3048
+
+data_long <- data %>%
+  pivot_longer(
+    cols = ends_with("_v1") | ends_with("_v2") | ends_with("_v3") | ends_with("_v4"),  # columns with visit data
+    names_to = c(".value", "visit"),       # use ".value" to keep the original variable name
+    names_pattern = "(.*)_(v[0-9])"        # regex to separate variable name and visit
+  ) %>%
+  mutate(visit = as.numeric(gsub("v", "", visit)))  # Convert "v1", "v2", to 1, 2, etc.
+
+vars_to_summarize <- c("dbh", "height", "canopy_ht", "brooms", "Gouting", "infestation_sum", "DISTANCE", "DISTANCE_noclump", "n", "n.infested", "perc.infested", "infested_sum",  "average.dbh_under",          
+"brooms_under", "avg.gouting_under" , "gouting.sum_under", "avg_crown_ht_under",  "mean_dist_infested", "basal_area_non_host", "basal_area_host", "percent_basal_area_non_host", "mean_percent_live_crown", "dist_nearest_tree")
+
+# Function to calculate summary statistics
+summary_stats <- function(data, vars) {
+  data %>%
+    group_by(visit, infested) %>%  
+    summarise(
+      across(
+        all_of(vars),
+        list(
+          mean = ~ mean(.x, na.rm = TRUE),
+          sd = ~ sd(.x, na.rm = TRUE),
+          n = ~ n(),
+          se = ~ sd(.x, na.rm = TRUE) / sqrt(n())
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    )
+}
+
+summary_table <- summary_stats(data_long, vars_to_summarize)
+
+names(summary_table)[11] <- "canopyht_mean"
+names(summary_table)[12] <- "canopyht_sd"
+names(summary_table)[13] <- "canopyht_n"
+names(summary_table)[14] <- "canopyht_se"
+names(summary_table)[23] <- "infestsum_mean"
+names(summary_table)[24] <- "infestsum_sd"
+names(summary_table)[25] <- "infestsum_n"
+names(summary_table)[26] <- "infestsum_se"
+names(summary_table)[31] <- "DISTnoclump_mean"
+names(summary_table)[32] <- "DISTnoclum_sd"
+names(summary_table)[33] <- "DISTnoclum_n"
+names(summary_table)[34] <- "DISTnoclum_se"
+names(summary_table)[47] <- "infestedsum_mean"
+names(summary_table)[48] <- "infestedsum_sd"
+names(summary_table)[49] <- "infestedsum_n"
+names(summary_table)[50] <- "infestedsum_se"
+names(summary_table)[51] <- "avg.dbh_mean"
+names(summary_table)[52] <- "avg.dbh_sd"
+names(summary_table)[53] <- "avg.dbh_n"
+names(summary_table)[54] <- "avg.dbh_se"
+names(summary_table)[55] <- "brooms.under_mean"
+names(summary_table)[56] <- "brooms.under_sd"
+names(summary_table)[57] <- "brooms.under_n"
+names(summary_table)[58] <- "brooms.under_se"
+names(summary_table)[59] <- "avg.gouting.under_mean"
+names(summary_table)[60] <- "avg.gouting.under_sd"
+names(summary_table)[61] <- "avg.gouting.under_n"
+names(summary_table)[62] <- "avg.gouting.under_se"
+names(summary_table)[63] <- "gouting.sum.under_mean"
+names(summary_table)[64] <- "gouting.sum.under_sd"
+names(summary_table)[65] <- "gouting.sum.under_n"
+names(summary_table)[66] <- "gouting.sum.under_se"
+names(summary_table)[67] <- "avg.crown.ht.under_mean"
+names(summary_table)[68] <- "avg.crown.ht.under_sd"
+names(summary_table)[69] <- "avg.crown.ht.under_n"
+names(summary_table)[70] <- "avg.crown.ht.under_se"
+names(summary_table)[71] <- "mean.dist.infested.under_mean"
+names(summary_table)[72] <- "mean.dist.infested.under_sd"
+names(summary_table)[73] <- "mean.dist.infested.under_n"
+names(summary_table)[74] <- "mean.dist.infested.under_se"
+names(summary_table)[75] <- "ba.nonhost.under_mean"
+names(summary_table)[76] <- "ba.nonhost.under_sd"
+names(summary_table)[77] <- "ba.nonhost.under_n"
+names(summary_table)[78] <- "ba.nonhost.under_se"
+names(summary_table)[79] <- "ba.host.under_mean"
+names(summary_table)[80] <- "ba.host.under_sd"
+names(summary_table)[81] <- "ba.host.under_n"
+names(summary_table)[82] <- "ba.host.under_se"
+names(summary_table)[83] <- "perc.ba.nonhost.under_mean"
+names(summary_table)[84] <- "perc.ba.nonhost.under_sd"
+names(summary_table)[85] <- "perc.ba.nonhost.under_n"
+names(summary_table)[86] <- "perc.ba.nonhost.under_se"
+names(summary_table)[87] <- "mean.perc.live.crown.under_mean"
+names(summary_table)[88] <- "mean.perc.live.crown.under_sd"
+names(summary_table)[89] <- "mean.perc.live.crown.under_n"
+names(summary_table)[90] <- "mean.perc.live.crown.under_se"
+names(summary_table)[91] <- "dist.nearest.tree_mean"
+names(summary_table)[92] <- "dist.nearest.tree_sd"
+names(summary_table)[93] <- "dist.nearest.tree_n"
+names(summary_table)[94] <- "dist.nearest.tree_se"
+
+
+# Reshape the data to prepare for plotting
+
+plot_data <-  summary_table %>%
+    # Pivot to long format
+    pivot_longer(cols = -c(visit, infested), 
+                 names_to = "variable_stat", 
+                 values_to = "value") %>%
+    # Separate variable name and statistic type
+    separate(variable_stat, into = c("variable", "stat_type"), sep = "_") %>%
+    # Pivot wider to create columns for each stat type (mean, se, etc.)
+    pivot_wider(names_from = stat_type, values_from = value) %>%
+    # Remove rows with NA in `mean` or `se` (optional, depending on data structure)
+    filter(!is.na(mean) & !is.na(se))
+
+# Plotting function
+plot_group <- function(data, variables) {
+  ggplot(data %>% filter(variable %in% variables), 
+         aes(x = factor(visit), y = mean, fill = as.factor(infested))) +
+    geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se), 
+                  position = position_dodge(0.9), width = 0.25) +
+    facet_wrap(~ variable, scales = "free_y", ncol = 2) +
+    scale_fill_manual(
+      values = c("0" = "lightblue", "1" = "red"),  
+      name = "Infestation Status",                
+      labels = c("Non-Infested", "Infested")      
+    ) +
+    labs(
+      title = "Mean with Standard Error by Visit",
+      x = "Visit",
+      y = "Mean Value",
+      fill = "Infestation Status"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top"
+    )
+}
+
+# Create subsets of variables for grouping
+variables_group1 <- c("dbh", "canopyht", "brooms", "height", "dist.nearest.tree")
+variables_group2 <- c("Gouting", "infestedsum", "DISTANCE", "DISTnoclump")
+variables_group3 <- c("n", "n.infested", "perc.infested", "infestedsum", "avg.dbh")
+variables_group4 <- c("avg.crown.ht.under",  "mean.dist.infested.under", "ba.nonhost.under", "ba.host.under")
+variables_group5 <- c("brooms.under", "avg.gouting.under", "gouting.sum.under")
+variables_group6 <- c("ba.host.under", "perc.ba.nonhost.under", "mean.perc.live.crown.under")
+
+
+# Generate plots for each group
+plot1 <- plot_group(plot_data, variables_group1)
+plot2 <- plot_group(plot_data, variables_group2)
+plot3 <- plot_group(plot_data, variables_group3)
+plot4 <- plot_group(plot_data, variables_group4)
+plot5 <- plot_group(plot_data, variables_group5)
+plot6 <- plot_group(plot_data, variables_group6)
+
+# Display the plots
+print(plot1)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+print(plot6)
+```
+
+# New infestations by size class
+
+```{r}
+data$dbh[is.na(data$dbh)] <- 2.54/2
+
+data <- data %>%
+  mutate(size_class = cut(dbh, breaks = seq(0, max(dbh, na.rm = TRUE) + 5, by = 5), right = FALSE))
+
+# Summarize new infestations by size class
+size_summary <- data %>%
+  group_by(size_class) %>%
+  summarize(
+    new_infestations = sum(new_infestation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot the data
+ggplot(size_summary, aes(x = size_class, y = new_infestations)) +
+  geom_bar(stat = "identity", fill = "skyblue", alpha = 0.8) +
+  labs(
+    title = "New Infestations by DBH Size Class",
+    x = "Size Class (cm)",
+    y = "Number of New Infestations"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+# Change in infestation sum from start vs infestation percentage at start of study
+
+```{r}
+
+infest_stats_sum <- data %>% group_by(site) %>% dplyr::summarise(
+  perc_infested_v1 = (sum(infested_v1) / n()) * 100, # percent infested at time 1
+  infest_sum_change = (sum(infestation_sum_v4, na.rm = TRUE) - sum(infestation_sum_v1, na.rm = TRUE))) # change in infestation sum over study
+
+infest_sum_plot <- ggplot(infest_stats_sum, aes(x = perc_infested_v1, y = infest_sum_change, label = site)) +
+  geom_point(size = 3, color = "blue") +
+  geom_text_repel(size = 3) +
+  labs(
+    y = "Change in Infestation Sum (Whole Study)",
+    x = "Percentage of Infested Trees (Start of Study)",
+    title = "Infested at start vs Change in Infestation Sum"
+  ) +
+  theme_minimal()
+
+infest_sum_plot
+infest_plot
+
+```
+
+# Look at Gouting change at each visit
+
+```{r}
+data$Gouting_v2[is.na(data$Gouting_v2)] <- 0
+data$Gouting_v3[is.na(data$Gouting_v3)] <- 0
+data$Gouting_v4[is.na(data$Gouting_v4)] <- 0
+
+gout_stats <- data %>% group_by(site) %>% dplyr::summarise(
+  "Mean - Visit 1" = mean(Gouting_v1),
+  "Mean - Visit 2" = mean(Gouting_v2),
+  "Mean - Visit 3" = mean(Gouting_v3),
+  "Mean - Visit 4" = mean(Gouting_v4))
+
+# reshape to long
+gout_long <- gout_stats %>%
+  pivot_longer(
+    cols = starts_with("Mean"), # Columns to reshape
+    names_to = "Visit", # New column to identify visits
+    values_to = "Mean"  # Values for the means
+  )
+
+gout_long$Visit <- gsub("Mean -", "", gout_long$Visit)
+# The palette with grey:
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+gout_plot <- ggplot(gout_long, aes(x = site, y = Mean, fill = Visit)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Gouting Mean Across Sites and Visits",
+    x = "Site",
+    y = "Mean Value"
+  ) +
+  theme_minimal() +
+  scale_color_manual(name="Visit", values = cbPalette) 
+```
+
+# Combine all points with cleaned data
+
+```{r}
+all_points <- read_xlsx("C:/Users/bwap/Documents/Project Files/Analysis/Cleaning and Compilation/Cleaning/all_sites_with_points.xlsx") # Visit 4 for all sites
+
+
+
+
+```
